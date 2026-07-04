@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2013-2018 Tomasz Moń <desowin@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <Shellapi.h>
 #include <Shlwapi.h>
 #include <Usbiodef.h>
@@ -26,6 +27,181 @@
 
 #define DEFAULT_INTERNAL_KERNEL_BUFFER_SIZE (1024*1024)
 #define DEFAULT_SNAPSHOT_LENGTH             (65535)
+
+typedef struct _usbpcap_match_info
+{
+    USHORT address;
+    USHORT vendor_id;
+    USHORT product_id;
+} usbpcap_match_info;
+
+typedef struct _usbpcap_match_list
+{
+    usbpcap_match_info *items;
+    size_t count;
+    char *address_list;
+} usbpcap_match_list;
+
+static void configure_utf8_console(void)
+{
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+}
+
+static int is_chinese_locale(void)
+{
+    LANGID langId = GetUserDefaultUILanguage();
+    WORD primaryLang = PRIMARYLANGID(langId);
+    return (primaryLang == LANG_CHINESE) ? 1 : 0;
+}
+
+static void json_print_escaped(FILE *stream, const char *value)
+{
+    const unsigned char *ptr = (const unsigned char *)value;
+
+    fputc('"', stream);
+    if (value != NULL)
+    {
+        while (*ptr)
+        {
+            switch (*ptr)
+            {
+                case '\\': fputs("\\\\", stream); break;
+                case '"': fputs("\\\"", stream); break;
+                case '\b': fputs("\\b", stream); break;
+                case '\f': fputs("\\f", stream); break;
+                case '\n': fputs("\\n", stream); break;
+                case '\r': fputs("\\r", stream); break;
+                case '\t': fputs("\\t", stream); break;
+                default:
+                    if (*ptr < 0x20)
+                    {
+                        fprintf(stream, "\\u%04x", *ptr);
+                    }
+                    else
+                    {
+                        fputc(*ptr, stream);
+                    }
+                    break;
+            }
+            ptr++;
+        }
+    }
+    fputc('"', stream);
+}
+
+static void print_json_error(const char *code, const char *message, const char *hint)
+{
+    printf("{\"ok\":false,\"errorCode\":");
+    json_print_escaped(stdout, code);
+    printf(",\"message\":");
+    json_print_escaped(stdout, message);
+    if (hint != NULL)
+    {
+        printf(",\"hint\":");
+        json_print_escaped(stdout, hint);
+    }
+    printf("}\n");
+}
+
+static BOOL parse_u32_value(const char *text, UINT32 *value)
+{
+    char *endptr;
+    unsigned long parsed;
+
+    if ((text == NULL) || (value == NULL) || (*text == '\0'))
+    {
+        return FALSE;
+    }
+
+    parsed = strtoul(text, &endptr, 0);
+    if ((*endptr != '\0') || (parsed > 0xFFFFFFFFUL))
+    {
+        return FALSE;
+    }
+
+    *value = (UINT32)parsed;
+    return TRUE;
+}
+
+static BOOL parse_u16_value(const char *text, USHORT *value)
+{
+    UINT32 parsed;
+    if ((parse_u32_value(text, &parsed) == FALSE) || (parsed > 0xFFFFU))
+    {
+        return FALSE;
+    }
+
+    *value = (USHORT)parsed;
+    return TRUE;
+}
+
+static const char *transfer_type_to_text(UCHAR transfer)
+{
+    switch (transfer)
+    {
+        case USBPCAP_TRANSFER_CONTROL: return "control";
+        case USBPCAP_TRANSFER_BULK: return "bulk";
+        case USBPCAP_TRANSFER_INTERRUPT: return "interrupt";
+        case USBPCAP_TRANSFER_ISOCHRONOUS: return "isochronous";
+        default: return "unknown";
+    }
+}
+
+static BOOL parse_transfer_type(const char *text, UCHAR *transfer)
+{
+    if ((text == NULL) || (transfer == NULL))
+    {
+        return FALSE;
+    }
+
+    if (_stricmp(text, "control") == 0)
+    {
+        *transfer = USBPCAP_TRANSFER_CONTROL;
+        return TRUE;
+    }
+    if (_stricmp(text, "bulk") == 0)
+    {
+        *transfer = USBPCAP_TRANSFER_BULK;
+        return TRUE;
+    }
+    if (_stricmp(text, "interrupt") == 0)
+    {
+        *transfer = USBPCAP_TRANSFER_INTERRUPT;
+        return TRUE;
+    }
+    if (_stricmp(text, "isochronous") == 0)
+    {
+        *transfer = USBPCAP_TRANSFER_ISOCHRONOUS;
+        return TRUE;
+    }
+    if (_stricmp(text, "unknown") == 0)
+    {
+        *transfer = USBPCAP_TRANSFER_UNKNOWN;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void free_match_list(usbpcap_match_list *matches)
+{
+    if (matches == NULL)
+    {
+        return;
+    }
+
+    if (matches->items != NULL)
+    {
+        free(matches->items);
+    }
+    if (matches->address_list != NULL)
+    {
+        free(matches->address_list);
+    }
+
+    memset(matches, 0, sizeof(*matches));
+}
 
 static BOOL IsElevated()
 {
@@ -258,6 +434,426 @@ EXTERN_C int WINAPI GetModuleFullName(__in HMODULE hModule, __out LPWSTR pszBuff
     return nLength;
 }
 
+static int list_interfaces(BOOL json_output)
+{
+    int i = 0;
+
+    filters_initialize();
+    if (json_output)
+    {
+        printf("{\"interfaces\":[");
+    }
+
+    while (usbpcapFilters[i] != NULL)
+    {
+        char *tmp = strrchr(usbpcapFilters[i]->device, '\\');
+        if (tmp == NULL)
+        {
+            tmp = usbpcapFilters[i]->device;
+        }
+        else
+        {
+            tmp++;
+        }
+
+        if (json_output)
+        {
+            if (i > 0)
+            {
+                printf(",");
+            }
+            printf("{\"name\":");
+            json_print_escaped(stdout, usbpcapFilters[i]->device);
+            printf(",\"displayName\":");
+            json_print_escaped(stdout, tmp);
+            printf("}");
+        }
+        else
+        {
+            printf("%s\n", usbpcapFilters[i]->device);
+        }
+
+        i++;
+    }
+
+    if (json_output)
+    {
+        printf("]}\n");
+    }
+
+    filters_free();
+    return 0;
+}
+
+static int list_devices(const char *filter, BOOL json_output)
+{
+    PUSBPCAP_CONNECTED_DEVICE_INFO devices = NULL;
+    size_t count = 0;
+    size_t i;
+
+    if (filter == NULL)
+    {
+        fprintf(stderr, "Interface must be specified with --interface when using --list-devices.\n"
+                        "Omit --interface to list devices from all interfaces.\n");
+        return -1;
+    }
+
+    if (enumerate_get_connected_devices(filter, &devices, &count) == FALSE)
+    {
+        fprintf(stderr, "Failed to enumerate connected devices for %s\n", filter);
+        return -1;
+    }
+
+    if (json_output)
+    {
+        printf("{\"interface\":");
+        json_print_escaped(stdout, filter);
+        printf(",\"devices\":[");
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        if (json_output)
+        {
+            if (i > 0)
+            {
+                printf(",");
+            }
+            printf("{\"address\":%u,\"port\":%lu,\"parentAddress\":%u,\"vendorId\":\"0x%04x\",\"productId\":\"0x%04x\",\"isHub\":%s,\"description\":",
+                   devices[i].address,
+                   devices[i].port,
+                   devices[i].parentAddress,
+                   devices[i].vendorId,
+                   devices[i].productId,
+                   devices[i].isHub ? "true" : "false");
+            json_print_escaped(stdout, devices[i].description);
+            printf("}");
+        }
+        else
+        {
+            printf("address=%u port=%lu parent=%u vid=0x%04x pid=0x%04x isHub=%s",
+                   devices[i].address,
+                   devices[i].port,
+                   devices[i].parentAddress,
+                   devices[i].vendorId,
+                   devices[i].productId,
+                   devices[i].isHub ? "true" : "false");
+            if (devices[i].description[0] != '\0')
+            {
+                printf("  %s", devices[i].description);
+            }
+            printf("\n");
+        }
+    }
+
+    if (json_output)
+    {
+        printf("]}\n");
+    }
+
+    if (devices != NULL)
+    {
+        free(devices);
+    }
+
+    return 0;
+}
+
+static int list_all_devices(BOOL json_output)
+{
+    int i = 0;
+    int device_count = 0;
+
+    filters_initialize();
+
+    if (json_output)
+    {
+        printf("{\"interfaces\":[");
+    }
+
+    while (usbpcapFilters[i] != NULL)
+    {
+        PUSBPCAP_CONNECTED_DEVICE_INFO devices = NULL;
+        size_t count = 0;
+        size_t j;
+        const char *filter = usbpcapFilters[i]->device;
+
+        if (enumerate_get_connected_devices(filter, &devices, &count) == FALSE)
+        {
+            i++;
+            continue;
+        }
+
+        if (json_output)
+        {
+            if (i > 0)
+            {
+                printf(",");
+            }
+            printf("{\"interface\":");
+            json_print_escaped(stdout, filter);
+            printf(",\"devices\":[");
+        }
+        else
+        {
+            if (i > 0)
+            {
+                printf("\n");
+            }
+            printf("[%s]\n", filter);
+        }
+
+        for (j = 0; j < count; j++)
+        {
+            if (json_output)
+            {
+                if (j > 0)
+                {
+                    printf(",");
+                }
+                printf("{\"address\":%u,\"vendorId\":\"0x%04x\",\"productId\":\"0x%04x\",\"isHub\":%s,\"description\":",
+                       devices[j].address,
+                       devices[j].vendorId,
+                       devices[j].productId,
+                       devices[j].isHub ? "true" : "false");
+                json_print_escaped(stdout, devices[j].description);
+                printf("}");
+            }
+            else
+            {
+                printf("  address=%-3u vid=0x%04x pid=0x%04x",
+                       devices[j].address,
+                       devices[j].vendorId,
+                       devices[j].productId);
+                if (devices[j].isHub)
+                {
+                    printf("  [Hub]");
+                }
+                if (devices[j].description[0] != '\0')
+                {
+                    printf("  %s", devices[j].description);
+                }
+                printf("\n");
+            }
+            device_count++;
+        }
+
+        if (json_output)
+        {
+            printf("]}");
+        }
+
+        if (devices != NULL)
+        {
+            free(devices);
+        }
+        i++;
+    }
+
+    if (json_output)
+    {
+        printf("]}\n");
+    }
+    else
+    {
+        printf("\nTotal: %d device(s) across %d interface(s)\n", device_count, i);
+    }
+
+    filters_free();
+    return 0;
+}
+
+static BOOL populate_device_metadata(struct thread_data *data, const char *filter)
+{
+    PUSBPCAP_CONNECTED_DEVICE_INFO devices = NULL;
+    size_t count = 0;
+    size_t i;
+
+    if ((data == NULL) || (filter == NULL))
+    {
+        return FALSE;
+    }
+
+    memset(data->device_metadata, 0, sizeof(data->device_metadata));
+
+    if (enumerate_get_connected_devices(filter, &devices, &count) == FALSE)
+    {
+        return FALSE;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        if (devices[i].address < 128)
+        {
+            data->device_metadata[devices[i].address].present = TRUE;
+            data->device_metadata[devices[i].address].vendor_id = devices[i].vendorId;
+            data->device_metadata[devices[i].address].product_id = devices[i].productId;
+        }
+    }
+
+    if (devices != NULL)
+    {
+        free(devices);
+    }
+
+    return TRUE;
+}
+
+static BOOL resolve_filter_matches(const char *filter,
+                                   BOOL has_vendor_id,
+                                   USHORT vendor_id,
+                                   BOOL has_product_id,
+                                   USHORT product_id,
+                                   usbpcap_match_list *matches)
+{
+    PUSBPCAP_CONNECTED_DEVICE_INFO devices = NULL;
+    size_t count = 0;
+    size_t i;
+    size_t found = 0;
+    size_t address_list_len = 0;
+
+    if ((filter == NULL) || (matches == NULL))
+    {
+        return FALSE;
+    }
+
+    memset(matches, 0, sizeof(*matches));
+
+    if (enumerate_get_connected_devices(filter, &devices, &count) == FALSE)
+    {
+        return FALSE;
+    }
+
+    matches->items = (usbpcap_match_info *)calloc(count == 0 ? 1 : count, sizeof(usbpcap_match_info));
+    if (matches->items == NULL)
+    {
+        if (devices != NULL)
+        {
+            free(devices);
+        }
+        return FALSE;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        if (has_vendor_id && (devices[i].vendorId != vendor_id))
+        {
+            continue;
+        }
+        if (has_product_id && (devices[i].productId != product_id))
+        {
+            continue;
+        }
+
+        matches->items[found].address = devices[i].address;
+        matches->items[found].vendor_id = devices[i].vendorId;
+        matches->items[found].product_id = devices[i].productId;
+        found++;
+        address_list_len += 5;
+    }
+
+    matches->count = found;
+    if (found > 0)
+    {
+        size_t offset = 0;
+        matches->address_list = (char *)malloc(address_list_len + 1);
+        if (matches->address_list == NULL)
+        {
+            if (devices != NULL)
+            {
+                free(devices);
+            }
+            free_match_list(matches);
+            return FALSE;
+        }
+
+        for (i = 0; i < found; i++)
+        {
+            int written = sprintf_s(matches->address_list + offset,
+                                    address_list_len + 1 - offset,
+                                    (i == 0) ? "%u" : ",%u",
+                                    matches->items[i].address);
+            if (written < 0)
+            {
+                if (devices != NULL)
+                {
+                    free(devices);
+                }
+                free_match_list(matches);
+                return FALSE;
+            }
+            offset += (size_t)written;
+        }
+    }
+
+    if (devices != NULL)
+    {
+        free(devices);
+    }
+
+    return TRUE;
+}
+
+static BOOL auto_select_interface(BOOL has_vendor_id,
+                                  USHORT vendor_id,
+                                  BOOL has_product_id,
+                                  USHORT product_id,
+                                  char **selected_device,
+                                  usbpcap_match_list *matches)
+{
+    int i = 0;
+    int foundFilters = 0;
+    usbpcap_match_list current;
+
+    if ((selected_device == NULL) || (matches == NULL))
+    {
+        return FALSE;
+    }
+
+    memset(matches, 0, sizeof(*matches));
+    filters_initialize();
+
+    while (usbpcapFilters[i] != NULL)
+    {
+        memset(&current, 0, sizeof(current));
+        if (resolve_filter_matches(usbpcapFilters[i]->device,
+                                   has_vendor_id,
+                                   vendor_id,
+                                   has_product_id,
+                                   product_id,
+                                   &current) == FALSE)
+        {
+            filters_free();
+            return FALSE;
+        }
+
+        if (current.count > 0)
+        {
+            foundFilters++;
+            if (foundFilters == 1)
+            {
+                *selected_device = _strdup(usbpcapFilters[i]->device);
+                *matches = current;
+            }
+            else
+            {
+                free_match_list(&current);
+                filters_free();
+                return FALSE;
+            }
+        }
+        else
+        {
+            free_match_list(&current);
+        }
+
+        i++;
+    }
+
+    filters_free();
+    return (foundFilters == 1);
+}
+
 /**
  *  Generates command line for worker process.
  *
@@ -277,7 +873,7 @@ static BOOL generate_worker_command_line(struct thread_data *data,
     PWSTR exePath;
     int exePathLen;
     PWSTR cmdLine = NULL;
-    int cmdLineLen;
+    size_t cmdLineLen;
     PWSTR pipeName = NULL;
     int nChars;
 
@@ -298,7 +894,7 @@ static BOOL generate_worker_command_line(struct thread_data *data,
     {
         /* Need to create pipe */
         WCHAR *tmp;
-        int nChars = sizeof("\\\\.\\pipe\\") + strlen(data->device) + 1;
+        int nChars = (int)(sizeof("\\\\.\\pipe\\") + strlen(data->device) + 1);
         pipeName = malloc((nChars + 1) * sizeof(WCHAR));
         if (pipeName == NULL)
         {
@@ -349,6 +945,14 @@ static BOOL generate_worker_command_line(struct thread_data *data,
 #define WORKER_CMD_LINE_FORMATTER_CAPTURE_ALL L" --capture-from-all-devices"
 #define WORKER_CMD_LINE_FORMATTER_CAPTURE_NEW L" --capture-from-new-devices"
 #define WORKER_CMD_LINE_FORMATTER_INJECT_DESCRIPTORS L" --inject-descriptors"
+#define WORKER_CMD_LINE_FORMATTER_DURATION    L" --duration %u"
+#define WORKER_CMD_LINE_FORMATTER_APP_FILTER  L" --app-filter"
+#define WORKER_CMD_LINE_FORMATTER_VENDOR      L" --vendor-id %u"
+#define WORKER_CMD_LINE_FORMATTER_PRODUCT     L" --product-id %u"
+#define WORKER_CMD_LINE_FORMATTER_ENDPOINT    L" --endpoint %u"
+#define WORKER_CMD_LINE_FORMATTER_TRANSFER    L" --transfer-type %S"
+#define WORKER_CMD_LINE_FORMATTER_STORE_ON_MATCH L" --store-mode on-match"
+#define WORKER_CMD_LINE_FORMATTER_NO_INTERACTIVE L" --no-interactive"
 
     cmdLineLen = MultiByteToWideChar(CP_ACP, 0, data->device, -1, NULL, 0);
     cmdLineLen += (pipeName == NULL) ? strlen(data->filename) : wcslen(pipeName);
@@ -361,6 +965,14 @@ static BOOL generate_worker_command_line(struct thread_data *data,
     cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_CAPTURE_ALL);
     cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_CAPTURE_NEW);
     cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_INJECT_DESCRIPTORS);
+    cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_DURATION);
+    cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_APP_FILTER);
+    cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_VENDOR);
+    cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_PRODUCT);
+    cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_ENDPOINT);
+    cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_TRANSFER);
+    cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_STORE_ON_MATCH);
+    cmdLineLen += wcslen(WORKER_CMD_LINE_FORMATTER_NO_INTERACTIVE);
     cmdLineLen += (data->address_list == NULL) ? 0 : strlen(data->address_list);
 
     cmdLine = (PWSTR)malloc(cmdLineLen * sizeof(WCHAR));
@@ -428,6 +1040,64 @@ static BOOL generate_worker_command_line(struct thread_data *data,
                              cmdLineLen - nChars,
                              WORKER_CMD_LINE_FORMATTER_INJECT_DESCRIPTORS);
     }
+
+    if (data->duration_seconds > 0)
+    {
+        nChars += swprintf_s(&cmdLine[nChars],
+                             cmdLineLen - nChars,
+                             WORKER_CMD_LINE_FORMATTER_DURATION,
+                             data->duration_seconds);
+    }
+
+    if (data->app_filter.enabled)
+    {
+        nChars += swprintf_s(&cmdLine[nChars],
+                             cmdLineLen - nChars,
+                             WORKER_CMD_LINE_FORMATTER_APP_FILTER);
+    }
+
+    if (data->app_filter.has_vendor_id)
+    {
+        nChars += swprintf_s(&cmdLine[nChars],
+                             cmdLineLen - nChars,
+                             WORKER_CMD_LINE_FORMATTER_VENDOR,
+                             data->app_filter.vendor_id);
+    }
+
+    if (data->app_filter.has_product_id)
+    {
+        nChars += swprintf_s(&cmdLine[nChars],
+                             cmdLineLen - nChars,
+                             WORKER_CMD_LINE_FORMATTER_PRODUCT,
+                             data->app_filter.product_id);
+    }
+
+    if (data->app_filter.has_endpoint)
+    {
+        nChars += swprintf_s(&cmdLine[nChars],
+                             cmdLineLen - nChars,
+                             WORKER_CMD_LINE_FORMATTER_ENDPOINT,
+                             data->app_filter.endpoint);
+    }
+
+    if (data->app_filter.has_transfer_type)
+    {
+        nChars += swprintf_s(&cmdLine[nChars],
+                             cmdLineLen - nChars,
+                             WORKER_CMD_LINE_FORMATTER_TRANSFER,
+                             transfer_type_to_text(data->app_filter.transfer_type));
+    }
+
+    if (data->store_mode == USBPCAP_STORE_MODE_ON_MATCH)
+    {
+        nChars += swprintf_s(&cmdLine[nChars],
+                             cmdLineLen - nChars,
+                             WORKER_CMD_LINE_FORMATTER_STORE_ON_MATCH);
+    }
+
+    nChars += swprintf_s(&cmdLine[nChars],
+                         cmdLineLen - nChars,
+                         WORKER_CMD_LINE_FORMATTER_NO_INTERACTIVE);
 #undef WORKER_CMD_LINE_FORMATTER_PIPE
 #undef WORKER_CMD_LINE_FORMATTER
 
@@ -436,6 +1106,14 @@ static BOOL generate_worker_command_line(struct thread_data *data,
 #undef WORKER_CMD_LINE_FORMATTER_CAPTURE_ALL
 #undef WORKER_CMD_LINE_FORMATTER_DEVICES
 #undef WORKER_CMD_LINE_FORMATTER_SNAPLEN
+#undef WORKER_CMD_LINE_FORMATTER_DURATION
+#undef WORKER_CMD_LINE_FORMATTER_APP_FILTER
+#undef WORKER_CMD_LINE_FORMATTER_VENDOR
+#undef WORKER_CMD_LINE_FORMATTER_PRODUCT
+#undef WORKER_CMD_LINE_FORMATTER_ENDPOINT
+#undef WORKER_CMD_LINE_FORMATTER_TRANSFER
+#undef WORKER_CMD_LINE_FORMATTER_STORE_ON_MATCH
+#undef WORKER_CMD_LINE_FORMATTER_NO_INTERACTIVE
 
     free(pipeName);
 
@@ -519,8 +1197,8 @@ static HANDLE create_breakaway_worker_in_job(struct thread_data *data, PWSTR app
      *
      * Hence create new string that will contain "appPath" appCmdLine.
      */
-    nChars = wcslen(appPath) + wcslen(appCmdLine) +
-             4 /* Two quotemarks, one space and NULL-terminator */;
+    nChars = (int)(wcslen(appPath) + wcslen(appCmdLine) +
+             4 /* Two quotemarks, one space and NULL-terminator */);
     processCmdLine = (PWSTR)malloc(nChars * sizeof(WCHAR));
     if (processCmdLine == NULL)
     {
@@ -745,8 +1423,9 @@ int cmd_interactive(struct thread_data *data)
  */
 static void wait_for_exit_signal(struct thread_data *data, HANDLE process)
 {
-    HANDLE handle_table[3] = {INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE};
+    HANDLE handle_table[4] = {INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE};
     HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE timer_handle = INVALID_HANDLE_VALUE;
     DWORD dw;
     int count = 0;
 
@@ -771,6 +1450,26 @@ static void wait_for_exit_signal(struct thread_data *data, HANDLE process)
     {
         handle_table[count] = process;
         count++;
+    }
+
+    if (data->duration_seconds > 0)
+    {
+        LARGE_INTEGER dueTime;
+        timer_handle = CreateWaitableTimer(NULL, TRUE, NULL);
+        if (timer_handle != NULL)
+        {
+            dueTime.QuadPart = -((LONGLONG)data->duration_seconds * 10000000LL);
+            if (SetWaitableTimer(timer_handle, &dueTime, 0, NULL, NULL, FALSE))
+            {
+                handle_table[count] = timer_handle;
+                count++;
+            }
+            else
+            {
+                CloseHandle(timer_handle);
+                timer_handle = INVALID_HANDLE_VALUE;
+            }
+        }
     }
 
     if (count == 0)
@@ -815,6 +1514,10 @@ static void wait_for_exit_signal(struct thread_data *data, HANDLE process)
                 /* Read thread has finished. Quit. */
                 break;
             }
+            else if (handle_table[i] == timer_handle)
+            {
+                break;
+            }
         }
         else if (dw == WAIT_FAILED)
         {
@@ -822,9 +1525,15 @@ static void wait_for_exit_signal(struct thread_data *data, HANDLE process)
             break;
         }
     }
+
+    if (timer_handle != INVALID_HANDLE_VALUE)
+    {
+        CancelWaitableTimer(timer_handle);
+        CloseHandle(timer_handle);
+    }
 }
 
-static void start_capture(struct thread_data *data)
+static int start_capture(struct thread_data *data)
 {
     HANDLE pipe_handle = INVALID_HANDLE_VALUE;
     HANDLE process = INVALID_HANDLE_VALUE;
@@ -838,13 +1547,13 @@ static void start_capture(struct thread_data *data)
     {
         fprintf(stderr, "Selected capture options result in empty capture.\n");
         fprintf(stderr, "Add command-line option -A to capture from all devices.\n");
-        return;
+        return -1;
     }
 
     if (FALSE == USBPcapInitAddressFilter(&data->filter, data->address_list, data->capture_all))
     {
         fprintf(stderr, "USBPcapInitAddressFilter failed!\n");
-        return;
+        return -1;
     }
 
     data->exit_event = CreateEvent(NULL, /* Handle cannot be inherited */
@@ -860,6 +1569,11 @@ static void start_capture(struct thread_data *data)
         if (strncmp("-", data->filename, 2) == 0)
         {
             data->write_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            data->output_created = (data->write_handle != INVALID_HANDLE_VALUE);
+        }
+        else if (data->store_mode == USBPCAP_STORE_MODE_ON_MATCH)
+        {
+            data->write_handle = INVALID_HANDLE_VALUE;
         }
         else
         {
@@ -870,6 +1584,7 @@ static void start_capture(struct thread_data *data)
                                              CREATE_NEW,
                                              FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED,
                                              NULL);
+            data->output_created = (data->write_handle != INVALID_HANDLE_VALUE);
         }
 
         if (data->inject_descriptors)
@@ -992,7 +1707,7 @@ static void start_capture(struct thread_data *data)
                         fprintf(stderr, "Failed to create job object!\n");
                         data->process = FALSE;
                         data->job_handle = INVALID_HANDLE_VALUE;
-                        return;
+                        return -1;
                     }
 
                     memset(&info, 0, sizeof(info));
@@ -1109,10 +1824,20 @@ static void start_capture(struct thread_data *data)
         CloseHandle(process);
     }
 
+    if ((data->output_created == FALSE) &&
+        (data->filename != NULL) &&
+        (strncmp(data->filename, "-", 2) != 0) &&
+        PathFileExistsA(data->filename))
+    {
+        data->output_created = TRUE;
+    }
+
     if (data->descriptors.descriptors)
     {
         descriptors_free_pcap(data->descriptors.descriptors);
     }
+
+    return data->output_created || (data->store_mode == USBPCAP_STORE_MODE_IMMEDIATE) ? 0 : 1;
 }
 
 static void print_extcap_version(void)
@@ -1245,8 +1970,8 @@ int cmd_extcap(struct thread_data *data)
         data->read_handle = INVALID_HANDLE_VALUE;
         data->write_handle = INVALID_HANDLE_VALUE;
 
-        start_capture(data);
-        return 0;
+        ret = start_capture(data);
+        return (ret == 1) ? 0 : ret;
     }
 
     return ret;
@@ -1324,35 +2049,297 @@ static void attach_parent_console()
     }
 }
 
-static void print_help(void)
+static void print_help(const char *topic)
 {
-    printf("Usage: USBPcapCMD.exe [options]\n"
-           "  -h, -?, --help\n"
-           "    Prints this help.\n"
-           "  -d <device>, --device <device>\n"
-           "    USBPcap control device to open. Example: -d \\\\.\\USBPcap1.\n"
-           "  -o <file>, --output <file>\n"
-           "    Output .pcap file name.\n"
-           "  -s <len>, --snaplen <len>\n"
-           "    Sets snapshot length.\n"
-           "  -b <len>, --bufferlen <len>\n"
-           "    Sets internal capture buffer length. Valid range <4096,134217728>.\n"
-           "  -A, --capture-from-all-devices\n"
-           "    Captures data from all devices connected to selected Root Hub.\n"
-           "  --devices <list>\n"
-           "    Captures data only from devices with addresses present in list.\n"
-           "    List is comma separated list of values. Example --devices 1,2,3.\n"
-           "  --inject-descriptors\n"
-           "    Inject already connected devices descriptors into capture data.\n"
-           "  -I,  --init-non-standard-hwids\n"
-           "    Initializes NonStandardHWIDs registry key used by USBPcapDriver.\n"
-           "    This registry key is needed for USB 3.0 capture.\n");
+    int zh = is_chinese_locale();
+
+    if ((topic != NULL) && (_stricmp(topic, "capture") == 0))
+    {
+        if (zh)
+        {
+            printf("捕获帮助：\n"
+                   "  -d <device>, --device <device>\n"
+                   "    要打开的 USBPcap 控制设备。示例：-d \\\\.\\USBPcap1。\n"
+                   "  --auto-interface\n"
+                   "    自动选择唯一匹配 VID/PID 过滤条件的接口。\n"
+                   "  -o <file>, --output <file>\n"
+                   "    输出 .pcap 文件名。使用 '-' 表示 stdout（管道模式）。\n"
+                   "  -s <len>, --snaplen <len>\n"
+                   "    设置抓包快照长度（字节）。默认 65535。\n"
+                   "  -b <len>, --bufferlen <len>\n"
+                   "    设置内部捕获缓冲区长度。有效范围 <4096,134217728>。\n"
+                   "  --duration <seconds>\n"
+                   "    指定时长（秒）后停止捕获。0 表示无限制。\n"
+                   "  -A, --capture-from-all-devices\n"
+                   "    从所选根集线器连接的所有设备捕获数据。\n"
+                   "  --capture-from-new-devices\n"
+                   "    同时捕获新接入的设备（任意 VID/PID）。\n"
+                   "  --inject-descriptors\n"
+                   "    将已连接设备的描述符注入捕获数据。\n"
+                   "  --store-mode <immediate|on-match>\n"
+                   "    immediate：立即写入。on-match：仅在匹配到数据包后才开始写入。\n"
+                   "  --json\n"
+                   "    以 UTF-8 JSON 格式输出到 stdout，用于设备发现和捕获结果。\n"
+                   "  --no-interactive\n"
+                   "    参数缺失时直接报错退出，不进入交互模式。\n");
+        }
+        else
+        {
+            printf("Capture help:\n"
+                   "  -d <device>, --device <device>\n"
+                   "    USBPcap control device to open. Example: -d \\\\.\\USBPcap1.\n"
+                   "  --auto-interface\n"
+                   "    Automatically choose the only interface that matches VID/PID filters.\n"
+                   "  -o <file>, --output <file>\n"
+                   "    Output .pcap file name. Use '-' for stdout (pipe mode).\n"
+                   "  -s <len>, --snaplen <len>\n"
+                   "    Sets snapshot length in bytes. Default 65535.\n"
+                   "  -b <len>, --bufferlen <len>\n"
+                   "    Sets internal capture buffer length. Valid range <4096,134217728>.\n"
+                   "  --duration <seconds>\n"
+                   "    Stops capture after the specified duration. 0 means unlimited.\n"
+                   "  -A, --capture-from-all-devices\n"
+                   "    Captures data from all devices connected to selected root hub.\n"
+                   "  --capture-from-new-devices\n"
+                   "    Also captures newly attached devices (any VID/PID).\n"
+                   "  --inject-descriptors\n"
+                   "    Inject already connected device descriptors into capture data.\n"
+                   "  --store-mode <immediate|on-match>\n"
+                   "    immediate: write immediately. on-match: write only after matching packet.\n"
+                   "  --json\n"
+                   "    Print UTF-8 JSON to stdout for discovery and final capture result.\n"
+                   "  --no-interactive\n"
+                   "    Fails instead of entering interactive mode when parameters are missing.\n");
+        }
+        return;
+    }
+
+    if ((topic != NULL) && (_stricmp(topic, "filter") == 0))
+    {
+        if (zh)
+        {
+            printf("过滤器帮助：\n"
+                   "  --vid/--vendor-id <hex-or-dec>   捕获前按 VID 过滤已连接设备。支持 0x 十六进制或十进制。\n"
+                   "                                示例：--vid 0x1d57 或 --vid 7511\n"
+                   "  --pid/--product-id <hex-or-dec>  可选 PID 过滤，与 --vid/--vendor-id 配合使用。\n"
+                   "                                示例：--pid 0xfa60 或 --pid 64096\n"
+                   "  --devices <list>              显式指定 USB 地址列表，如 1,2,7。\n"
+                   "  --app-filter                  启用应用层过滤（数据包到达用户态后过滤）。\n"
+                   "  --endpoint <hex-or-dec>       按端点过滤，如 0x81 (IN) 或 0x02 (OUT)。\n"
+                   "  --transfer-type <name>        传输类型：control, bulk, interrupt, isochronous, unknown。\n"
+                   "  --capture-from-new-devices    同时捕获任意 VID/PID 的新接入设备。无法按 VID/PID 精确过滤。\n");
+        }
+        else
+        {
+            printf("Filter help:\n"
+                   "  --vid/--vendor-id <hex-or-dec>   Filter by VID before capture. Supports 0x hex or decimal.\n"
+                   "                                Example: --vid 0x1d57 or --vid 7511\n"
+                   "  --pid/--product-id <hex-or-dec>  Optional PID filter. Use with --vid/--vendor-id.\n"
+                   "                                Example: --pid 0xfa60 or --pid 64096\n"
+                   "  --devices <list>              Explicit USB address list, for example 1,2,7.\n"
+                   "  --app-filter                  Enable application-layer filtering (post-driver).\n"
+                   "  --endpoint <hex-or-dec>       Filter by endpoint, for example 0x81 (IN) or 0x02 (OUT).\n"
+                   "  --transfer-type <name>        One of control, bulk, interrupt, isochronous, unknown.\n"
+                   "  --capture-from-new-devices    Adds newly connected devices of any VID/PID. Not precise by VID/PID.\n");
+        }
+        return;
+    }
+
+    if ((topic != NULL) && (_stricmp(topic, "json") == 0))
+    {
+        if (zh)
+        {
+            printf("JSON 帮助：\n"
+                   "  --json                        以机器可读的 UTF-8 JSON 格式输出到 stdout。\n"
+                   "  JSON 模式下所有输出均为合法 JSON，错误信息包含 errorCode、message 和可选的 hint。\n"
+                   "  捕获前使用 --list-interfaces 或 --list-devices 进行设备发现（建议加 --json）。\n"
+                   "  自动化场景推荐组合：--json --no-interactive。\n");
+        }
+        else
+        {
+            printf("JSON help:\n"
+                   "  --json                        Print machine-readable UTF-8 JSON to stdout.\n"
+                   "  All output is valid JSON; errors include errorCode, message, and optional hint.\n"
+                   "  Use --list-interfaces or --list-devices with --json for device discovery.\n"
+                   "  Recommended for automation: --json --no-interactive.\n");
+        }
+        return;
+    }
+
+    if ((topic != NULL) && (_stricmp(topic, "examples") == 0))
+    {
+        printf("Examples:\n"
+               "  USBPcapCMD.exe --list-interfaces --json\n"
+               "  USBPcapCMD.exe --list-devices --json\n"
+               "  USBPcapCMD.exe --list-devices --interface \\\\.\\USBPcap2 --json\n"
+               "  USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --output out.pcap --duration 10 --json --no-interactive\n"
+               "  USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --endpoint 0x81 --app-filter --store-mode on-match --output monitor.pcap --duration 3600 --json --no-interactive\n");
+        return;
+    }
+
+    if (zh)
+    {
+        printf("用法：USBPcapCMD.exe [选项]\n"
+               "  示例：\n"
+               "  1. 指定 VID/PID 捕获一段文件：\n"
+               "    USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --json --no-interactive\n"
+               "  2. 在上例基础上增加时长限制（30 秒自动停止）：\n"
+               "    USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --duration 30 --json --no-interactive\n"
+               "  --------------------------------------------------\n"
+               "  新增选项：\n"
+               "  --list-devices [--interface <name>]\n"
+               "    列出 USB 设备（VID/PID/描述/Hub）。不加 --interface 时列出所有接口的全部设备，\n"
+               "    加 --interface 时仅列出指定接口下的设备。\n"
+               "  --auto-interface\n"
+               "    自动扫描所有 USBPcap 接口，找到唯一匹配 --vid/--vendor-id / --pid/--product-id 的接口并使用。\n"
+               "    适用于不确定目标设备在哪个 USBPcap 接口上的场景，避免手动指定 -d。\n"
+               "    前提：VID/PID 在所有接口中仅匹配到一个，否则报错。\n"
+               "  --vid/--vendor-id <hex-or-dec>, --pid/--product-id <hex-or-dec>\n"
+               "    捕获前按 VID/PID 过滤已连接设备。仅匹配 VID/PID 的设备会被捕获。\n"
+               "    示例：--vid 0x1d57 --pid 0xfa60  (十六进制)\n"
+               "          --vid 7511 --pid 64096      (十进制亦可)\n"
+               "  --duration <seconds>\n"
+               "    指定时长（秒）后自动停止捕获。默认 0 表示无限制，需手动 Ctrl+C 停止。\n"
+               "    示例：--duration 30   (30 秒后自动停止)\n"
+               "  --capture-from-new-devices\n"
+               "    在捕获过程中也抓取中途新插入的 USB 设备数据。\n"
+               "    用于热插拔测试场景：如设备周期性上下电、USB 插拔测试时需要捕获瞬时连接设备的流量。\n"
+               "    注意：新设备的 VID/PID 不受过滤限制，只要是新接入的设备都会被捕获。\n"
+               "  --inject-descriptors\n"
+               "    在捕获开始前将已连接设备的 USB 描述符（设备/配置/接口/端点描述符）注入 pcap 文件。\n"
+               "    这样 Wireshark 等工具能解析出设备类型和端点信息，即使实际抓包中未包含描述符请求。\n"
+               "    注意：仅注入当前已连接设备的描述符，不包含中途新插入的设备。\n"
+               "  --store-mode <immediate|on-match>\n"
+               "    immediate：所有数据包立即写入 pcap 文件（默认行为）。\n"
+               "    on-match：先缓存数据包，直到出现第一个匹配过滤规则的数据包后才开始写入，\n"
+               "              之前缓存的数据包也会一并写入。适合只关注「匹配后」的流量。\n"
+               "  --app-filter --endpoint <hex-or-dec> --transfer-type <name>\n"
+               "    启用应用层（用户态）数据包过滤，在数据包到达用户态后按条件丢弃不匹配的包。\n"
+               "    --endpoint：按 USB 端点地址过滤，如 0x81 (IN 端点)、0x02 (OUT 端点)。\n"
+               "    --transfer-type：按传输类型过滤，可选：control, bulk, interrupt, isochronous, unknown。\n"
+               "    注意：驱动层仍会捕获所有数据包，过滤发生在写入 pcap 之前。\n"
+               "  --json\n"
+               "    以 UTF-8 JSON 格式输出信息到 stdout（设备发现和捕获结果），便于脚本/程序解析。\n"
+               "    非 JSON 模式输出人类可读文本。JSON 模式下所有错误也以 JSON 返回，\n"
+               "    包含 errorCode、message 和可选的 hint 字段。\n"
+               "    推荐自动化/无人值守场景使用 --json，需同时加 --no-interactive。\n"
+               "  --no-interactive\n"
+               "    批量/自动化模式：缺少必填参数时直接返回错误并退出，不会弹出交互式提示或控制台窗口。\n"
+               "    适用于脚本调用、服务调用、CI/CD 等无人值守场景，与 --json 组合使用效果最佳。\n"
+               "  --------------------------------------------------\n"
+               "  -h, -?, --help [capture|filter|json|examples]\n"
+               "    打印帮助信息。子主题：capture, filter, json, examples。\n"
+               "  --list-interfaces\n"
+               "    列出可用的 USBPcap 接口。\n"
+               "  -d <device>, --device <device>, --interface <name>\n"
+               "    要打开的 USBPcap 控制设备。示例：-d \\\\.\\USBPcap1。\n"
+               "  -o <file>, --output <file>\n"
+               "    输出 .pcap 文件名。使用 '-' 表示 stdout（管道模式）。\n"
+               "  -s <len>, --snaplen <len>\n"
+               "    设置抓包快照长度。\n"
+               "  -b <len>, --bufferlen <len>\n"
+               "    设置内部捕获缓冲区长度。有效范围 <4096,134217728>。\n"
+               "  -A, --capture-from-all-devices\n"
+               "    从所选根集线器连接的所有设备捕获数据。\n"
+               "  --devices <list>\n"
+               "    仅从列表中指定地址的设备捕获数据。\n"
+               "  -I, --init-non-standard-hwids\n"
+               "    初始化 USBPcapDriver 使用的 NonStandardHWIDs 注册表项。\n");
+    }
+    else
+    {
+        printf("Usage: USBPcapCMD.exe [options]\n"
+               "  Examples:\n"
+               "  1. Capture with VID/PID filter:\n"
+               "    USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --json --no-interactive\n"
+               "  2. Add duration limit (auto-stop after 30s):\n"
+               "    USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --duration 30 --json --no-interactive\n"
+               "  --------------------------------------------------\n"
+               "  New options:\n"
+               "  --list-devices [--interface <name>]\n"
+               "    Lists USB devices (VID/PID/description/hub). Without --interface, lists all\n"
+               "    devices across every USBPcap interface. With --interface, limits to that interface.\n"
+               "  --auto-interface\n"
+               "    Automatically scans all USBPcap interfaces and selects the one that uniquely\n"
+               "    matches the given --vid/--vendor-id / --pid/--product-id. Use when you don't know which\n"
+               "    USBPcap interface your target device is on — eliminates manual -d discovery.\n"
+               "    Prerequisite: VID/PID must match exactly one interface, or an error is returned.\n"
+               "  --vid/--vendor-id <hex-or-dec>, --pid/--product-id <hex-or-dec>\n"
+               "    Filters connected devices by VID/PID before capture starts. Only matching devices\n"
+               "    are captured. Supports hex (0x prefix) or decimal.\n"
+               "    Example: --vid 0x1d57 --pid 0xfa60  (hex)\n"
+               "             --vendor-id 7511 --product-id 64096      (decimal also works)\n"
+               "  --duration <seconds>\n"
+               "    Automatically stops capture after N seconds. Default 0 = unlimited (Ctrl+C to stop).\n"
+               "    Example: --duration 30   (auto-stop after 30s)\n"
+               "  --capture-from-new-devices\n"
+               "    Also captures USB devices that are hot-plugged during the capture session.\n"
+               "    Use for hot-plug testing: devices that power-cycle periodically, or USB\n"
+               "    plug/unplug scenarios where you need to capture transient device traffic.\n"
+               "    Note: new devices are captured regardless of VID/PID filter settings.\n"
+               "  --inject-descriptors\n"
+               "    Injects the USB descriptors (device/config/interface/endpoint) of currently\n"
+               "    connected devices into the pcap file before capture begins. This helps tools\n"
+               "    like Wireshark resolve device types and endpoint info even when the capture\n"
+               "    doesn't contain the original descriptor requests.\n"
+               "    Note: only injects descriptors present at capture start, not mid-session hot-plugs.\n"
+               "  --store-mode <immediate|on-match>\n"
+               "    immediate: write every packet to the pcap file immediately (default).\n"
+               "    on-match: buffer packets until a matching packet arrives, then start writing\n"
+               "              (previously buffered packets are flushed first). Useful when you\n"
+               "              only care about traffic after a specific trigger event.\n"
+               "  --app-filter --endpoint <hex-or-dec> --transfer-type <name>\n"
+               "    Enables user-mode packet filtering. Packets that don't match are discarded\n"
+               "    before writing to the pcap file.\n"
+               "    --endpoint: filter by USB endpoint address, e.g. 0x81 (IN), 0x02 (OUT).\n"
+               "    --transfer-type: control, bulk, interrupt, isochronous, or unknown.\n"
+               "    Note: the driver still captures all packets; filtering happens in user mode.\n"
+               "  --json\n"
+               "    Output machine-readable UTF-8 JSON to stdout for discovery results and capture\n"
+               "    results. Errors also return JSON with errorCode, message, and optional hint.\n"
+               "    Recommended for automation/scripting; combine with --no-interactive.\n"
+               "  --no-interactive\n"
+               "    Batch/automation mode: fails immediately with an error instead of prompting\n"
+               "    interactively or opening a console window when required parameters are missing.\n"
+               "    Designed for scripts, services, and CI/CD pipelines. Best used with --json.\n"
+               "  --------------------------------------------------\n"
+               "  -h, -?, --help [capture|filter|json|examples]\n"
+               "    Prints help. Topics: capture, filter, json, examples.\n"
+               "  --list-interfaces\n"
+               "    Lists available USBPcap interfaces.\n"
+               "  -d <device>, --device <device>, --interface <name>\n"
+               "    USBPcap control device to open. Example: -d \\\\.\\USBPcap1.\n"
+               "  -o <file>, --output <file>\n"
+               "    Output .pcap file name. Use '-' for stdout (pipe mode).\n"
+               "  -s <len>, --snaplen <len>\n"
+               "    Sets snapshot length.\n"
+               "  -b <len>, --bufferlen <len>\n"
+               "    Sets internal capture buffer length. Valid range <4096,134217728>.\n"
+               "  -A, --capture-from-all-devices\n"
+               "    Captures data from all devices connected to selected root hub.\n"
+               "  --devices <list>\n"
+               "    Captures data only from devices with addresses present in list.\n"
+               "  -I, --init-non-standard-hwids\n"
+               "    Initializes NonStandardHWIDs registry key used by USBPcapDriver.\n");
+    }
 }
 
 /* Commandline arguments without short option */
 #define ARG_DEVICES                    900
 #define ARG_CAPTURE_FROM_NEW_DEVICES   901
 #define ARG_INJECT_DESCRIPTORS         902
+#define ARG_JSON                       903
+#define ARG_LIST_INTERFACES            904
+#define ARG_LIST_DEVICES               905
+#define ARG_VENDOR_ID                  906
+#define ARG_PRODUCT_ID                 907
+#define ARG_AUTO_INTERFACE             908
+#define ARG_DURATION                   909
+#define ARG_NO_INTERACTIVE             910
+#define ARG_APP_FILTER                 911
+#define ARG_ENDPOINT                   912
+#define ARG_TRANSFER_TYPE              913
+#define ARG_STORE_MODE                 914
 #define ARG_EXTCAP_VERSION            1000
 #define ARG_EXTCAP_INTERFACES         1001
 #define ARG_EXTCAP_INTERFACE          1002
@@ -1368,17 +2355,44 @@ int __cdecl main(int argc, CHAR **argv)
 #endif
 {
     int ret = -1;
+    int capture_ret;
     struct thread_data data;
+    usbpcap_match_list matches;
+    BOOL json_output = FALSE;
+    BOOL list_interfaces_flag = FALSE;
+    BOOL list_devices_flag = FALSE;
+    BOOL no_interactive = FALSE;
+    BOOL auto_interface = FALSE;
+    BOOL has_vendor_id = FALSE;
+    BOOL has_product_id = FALSE;
+    USHORT vendor_id = 0;
+    USHORT product_id = 0;
+    const char *help_topic = NULL;
     static struct option long_options[] =
     {
         {"help", no_argument, 0, 'h'},
         {"device", required_argument, 0, 'd'},
+        {"interface", required_argument, 0, 'd'},
         {"output", required_argument, 0, 'o'},
         {"snaplen", required_argument, 0, 's'},
         {"bufferlen", required_argument, 0, 'b'},
         {"init-non-standard-hwids", no_argument, 0, 'I'},
         /* Capture options. */
+        {"json", no_argument, 0, ARG_JSON},
+        {"list-interfaces", no_argument, 0, ARG_LIST_INTERFACES},
+        {"list-devices", no_argument, 0, ARG_LIST_DEVICES},
         {"devices", required_argument, 0, ARG_DEVICES},
+        {"vendor-id", required_argument, 0, ARG_VENDOR_ID},
+        {"vid", required_argument, 0, ARG_VENDOR_ID},
+        {"product-id", required_argument, 0, ARG_PRODUCT_ID},
+        {"pid", required_argument, 0, ARG_PRODUCT_ID},
+        {"auto-interface", no_argument, 0, ARG_AUTO_INTERFACE},
+        {"duration", required_argument, 0, ARG_DURATION},
+        {"no-interactive", no_argument, 0, ARG_NO_INTERACTIVE},
+        {"app-filter", no_argument, 0, ARG_APP_FILTER},
+        {"endpoint", required_argument, 0, ARG_ENDPOINT},
+        {"transfer-type", required_argument, 0, ARG_TRANSFER_TYPE},
+        {"store-mode", required_argument, 0, ARG_STORE_MODE},
         {"capture-from-all-devices", no_argument, 0, 'A'},
         {"capture-from-new-devices", no_argument, 0, ARG_CAPTURE_FROM_NEW_DEVICES},
         {"inject-descriptors", no_argument, 0, ARG_INJECT_DESCRIPTORS},
@@ -1398,6 +2412,9 @@ int __cdecl main(int argc, CHAR **argv)
     int c;
 
     attach_parent_console();
+    configure_utf8_console();
+
+    memset(&matches, 0, sizeof(matches));
 
     data.filename = NULL;
     data.device = NULL;
@@ -1412,6 +2429,13 @@ int __cdecl main(int argc, CHAR **argv)
     data.read_handle = INVALID_HANDLE_VALUE;
     data.write_handle = INVALID_HANDLE_VALUE;
     data.exit_event = INVALID_HANDLE_VALUE;
+    data.duration_seconds = 0;
+    data.store_mode = USBPCAP_STORE_MODE_IMMEDIATE;
+    data.triggered = FALSE;
+    data.output_created = FALSE;
+    data.dropped_packets = 0;
+    memset(&data.app_filter, 0, sizeof(data.app_filter));
+    memset(data.device_metadata, 0, sizeof(data.device_metadata));
 
     while (-1 != (c = getopt_long(argc, argv, "hd:o:s:b:IA", long_options, &option_index)))
     {
@@ -1421,7 +2445,11 @@ int __cdecl main(int argc, CHAR **argv)
                 /* getopt_long has set the flag. */
                 break;
             case 'h': /* --help */
-                print_help();
+                if ((optind < argc) && (argv[optind][0] != '-'))
+                {
+                    help_topic = argv[optind];
+                }
+                print_help(help_topic);
                 return 0;
             case 'd': /* --device */
 #pragma warning(push)
@@ -1459,6 +2487,84 @@ int __cdecl main(int argc, CHAR **argv)
             case ARG_DEVICES:
                 data.address_list = optarg;
                 break;
+            case ARG_JSON:
+                json_output = TRUE;
+                break;
+            case ARG_LIST_INTERFACES:
+                list_interfaces_flag = TRUE;
+                break;
+            case ARG_LIST_DEVICES:
+                list_devices_flag = TRUE;
+                break;
+            case ARG_VENDOR_ID:
+                if (parse_u16_value(optarg, &vendor_id) == FALSE)
+                {
+                    fprintf(stderr, "Invalid vendor id: %s\n", optarg);
+                    return -1;
+                }
+                has_vendor_id = TRUE;
+                break;
+            case ARG_PRODUCT_ID:
+                if (parse_u16_value(optarg, &product_id) == FALSE)
+                {
+                    fprintf(stderr, "Invalid product id: %s\n", optarg);
+                    return -1;
+                }
+                has_product_id = TRUE;
+                break;
+            case ARG_AUTO_INTERFACE:
+                auto_interface = TRUE;
+                break;
+            case ARG_DURATION:
+                if (parse_u32_value(optarg, &data.duration_seconds) == FALSE)
+                {
+                    fprintf(stderr, "Invalid duration: %s\n", optarg);
+                    return -1;
+                }
+                break;
+            case ARG_NO_INTERACTIVE:
+                no_interactive = TRUE;
+                break;
+            case ARG_APP_FILTER:
+                data.app_filter.enabled = TRUE;
+                break;
+            case ARG_ENDPOINT:
+            {
+                USHORT endpoint;
+                if (parse_u16_value(optarg, &endpoint) == FALSE || endpoint > 0xFF)
+                {
+                    fprintf(stderr, "Invalid endpoint: %s\n", optarg);
+                    return -1;
+                }
+                data.app_filter.enabled = TRUE;
+                data.app_filter.has_endpoint = TRUE;
+                data.app_filter.endpoint = (UCHAR)endpoint;
+                break;
+            }
+            case ARG_TRANSFER_TYPE:
+                if (parse_transfer_type(optarg, &data.app_filter.transfer_type) == FALSE)
+                {
+                    fprintf(stderr, "Invalid transfer type: %s\n", optarg);
+                    return -1;
+                }
+                data.app_filter.enabled = TRUE;
+                data.app_filter.has_transfer_type = TRUE;
+                break;
+            case ARG_STORE_MODE:
+                if (_stricmp(optarg, "immediate") == 0)
+                {
+                    data.store_mode = USBPCAP_STORE_MODE_IMMEDIATE;
+                }
+                else if (_stricmp(optarg, "on-match") == 0)
+                {
+                    data.store_mode = USBPCAP_STORE_MODE_ON_MATCH;
+                }
+                else
+                {
+                    fprintf(stderr, "Invalid store mode: %s\n", optarg);
+                    return -1;
+                }
+                break;
             case 'A': /* --capture-from-all-devices */
                 data.capture_all = TRUE;
                 break;
@@ -1491,10 +2597,21 @@ int __cdecl main(int argc, CHAR **argv)
         }
     }
 
+    if (has_vendor_id)
+    {
+        data.app_filter.has_vendor_id = TRUE;
+        data.app_filter.vendor_id = vendor_id;
+    }
+    if (has_product_id)
+    {
+        data.app_filter.has_product_id = TRUE;
+        data.app_filter.product_id = product_id;
+    }
+
     if (data.snaplen > (data.bufferlen - sizeof(pcaprec_hdr_t)))
     {
-        fprintf(stderr, "Packets larger than %u bytes won't be captured due to too small buffer.\n",
-                data.bufferlen - sizeof(pcaprec_hdr_t));
+        fprintf(stderr, "Packets larger than %zu bytes won't be captured due to too small buffer.\n",
+            (size_t)(data.bufferlen - sizeof(pcaprec_hdr_t)));
     }
 
     /* Handle extcap options separately from standard USBPcapCMD options. */
@@ -1502,31 +2619,185 @@ int __cdecl main(int argc, CHAR **argv)
     {
         ret = cmd_extcap(&data);
     }
+    else if (list_interfaces_flag)
+    {
+        ret = list_interfaces(json_output);
+    }
+    else if (list_devices_flag)
+    {
+        if (data.device != NULL)
+        {
+            ret = list_devices(data.device, json_output);
+        }
+        else
+        {
+            ret = list_all_devices(json_output);
+        }
+    }
     else
     {
         ret = 0;
 
-        if ((data.filename == NULL) || (data.device == NULL))
+        if (auto_interface && (data.device == NULL))
         {
-            if (data.filename != NULL)
+            if (!has_vendor_id && !has_product_id)
             {
-                free(data.filename);
-                data.filename = NULL;
+                if (json_output)
+                {
+                    print_json_error("AUTO_INTERFACE_REQUIRES_FILTER",
+                                     "--auto-interface requires --vendor-id or --product-id.",
+                                     "Specify --vendor-id first, or pass --device explicitly.");
+                }
+                else
+                {
+                    fprintf(stderr, "--auto-interface requires --vendor-id or --product-id.\n");
+                }
+                ret = -1;
             }
-
-            if (data.device != NULL)
+            else if (auto_select_interface(has_vendor_id, vendor_id, has_product_id, product_id, &data.device, &matches) == FALSE)
             {
-                free(data.device);
-                data.device = NULL;
+                if (json_output)
+                {
+                    print_json_error("AUTO_INTERFACE_NOT_UNIQUE",
+                                     "Unable to auto-select a unique USBPcap interface for the requested VID/PID.",
+                                     "Run USBPcapCMD.exe --list-interfaces --json and USBPcapCMD.exe --list-devices --device <name> --json.");
+                }
+                else
+                {
+                    fprintf(stderr, "Unable to auto-select a unique USBPcap interface for the requested VID/PID.\n");
+                }
+                ret = -1;
             }
+        }
 
-            ret = cmd_interactive(&data);
+        if ((ret == 0) && (data.device != NULL) && (has_vendor_id || has_product_id) && (matches.count == 0))
+        {
+            if (resolve_filter_matches(data.device,
+                                       has_vendor_id,
+                                       vendor_id,
+                                       has_product_id,
+                                       product_id,
+                                       &matches) == FALSE)
+            {
+                if (json_output)
+                {
+                    print_json_error("ENUMERATION_FAILED",
+                                     "Failed to enumerate connected USB devices.",
+                                     "Verify that the USBPcap driver is installed and the selected interface exists.");
+                }
+                else
+                {
+                    fprintf(stderr, "Failed to enumerate connected USB devices.\n");
+                }
+                ret = -1;
+            }
+            else if (matches.count == 0)
+            {
+                if (json_output)
+                {
+                    print_json_error("NO_MATCHED_DEVICE",
+                                     "No connected USB device matched the requested VID/PID.",
+                                     "Run USBPcapCMD.exe --list-devices --device <name> --json to inspect current devices.");
+                }
+                else
+                {
+                    fprintf(stderr, "No connected USB device matched the requested VID/PID.\n");
+                }
+                ret = -1;
+            }
+            else
+            {
+                data.address_list = matches.address_list;
+            }
+        }
+
+        if ((ret == 0) && ((data.filename == NULL) || (data.device == NULL)))
+        {
+            if (no_interactive)
+            {
+                if (json_output)
+                {
+                    print_json_error("MISSING_REQUIRED_ARGUMENT",
+                                     "Capture mode requires both --device and --output unless discovery mode is used.",
+                                     "Use --list-interfaces / --list-devices first, or omit --no-interactive to use interactive mode.");
+                }
+                else
+                {
+                    fprintf(stderr, "Capture mode requires both --device and --output unless discovery mode is used.\n");
+                }
+                ret = -1;
+            }
+            else
+            {
+                if (data.filename != NULL)
+                {
+                    free(data.filename);
+                    data.filename = NULL;
+                }
+
+                if (data.device != NULL)
+                {
+                    free(data.device);
+                    data.device = NULL;
+                }
+
+                ret = cmd_interactive(&data);
+            }
         }
 
         if (ret == 0)
         {
+            if (populate_device_metadata(&data, data.device) == FALSE)
+            {
+                memset(data.device_metadata, 0, sizeof(data.device_metadata));
+            }
+
             data.process = TRUE;
-            start_capture(&data);
+            capture_ret = start_capture(&data);
+            if ((capture_ret == 1) && (data.store_mode == USBPCAP_STORE_MODE_ON_MATCH))
+            {
+                ret = 0;
+            }
+            else
+            {
+                ret = capture_ret;
+            }
+
+            if (json_output)
+            {
+                printf("{\"ok\":true,\"storeMode\":");
+                json_print_escaped(stdout, data.store_mode == USBPCAP_STORE_MODE_ON_MATCH ? "on-match" : "immediate");
+                printf(",\"triggered\":%s,\"output\":", data.triggered ? "true" : "false");
+                if (data.output_created && (data.filename != NULL))
+                {
+                    json_print_escaped(stdout, data.filename);
+                }
+                else
+                {
+                    printf("null");
+                }
+                printf(",\"droppedPackets\":%lu,\"matchedDevices\":[", data.dropped_packets);
+                for (option_index = 0; option_index < (int)matches.count; option_index++)
+                {
+                    if (option_index > 0)
+                    {
+                        printf(",");
+                    }
+                    printf("{\"interface\":");
+                    json_print_escaped(stdout, data.device);
+                    printf(",\"address\":%u,\"vendorId\":\"0x%04x\",\"productId\":\"0x%04x\"}",
+                           matches.items[option_index].address,
+                           matches.items[option_index].vendor_id,
+                           matches.items[option_index].product_id);
+                }
+                printf("]");
+                if ((data.store_mode == USBPCAP_STORE_MODE_ON_MATCH) && (data.triggered == FALSE))
+                {
+                    printf(",\"reason\":");
+                    json_print_escaped(stdout, "No packet matched trigger conditions before capture ended.");
+                }
+                printf("}\n");
+            }
         }
     }
 
@@ -1551,6 +2822,7 @@ int __cdecl main(int argc, CHAR **argv)
     {
         CloseHandle(data.exit_event);
     }
+    free_match_list(&matches);
 
     return ret;
 }

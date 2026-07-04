@@ -1,0 +1,6 @@
+{
+  "cmake.configureOnOpen": false,
+  "cmake.useCMakePresets": "always",
+  "cmake.configurePreset": "vs2022-x64-debug",
+  "cmake.buildPreset": "build-debug"
+}

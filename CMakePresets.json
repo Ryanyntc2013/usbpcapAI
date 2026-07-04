@@ -1,0 +1,40 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "vs2022-x64-debug",
+      "displayName": "VS2022 x64 Debug",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/out/build/vs2022-x64-debug",
+      "architecture": "x64"
+    },
+    {
+      "name": "vs2022-x64-release",
+      "displayName": "VS2022 x64 Release",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/out/build/vs2022-x64-release",
+      "architecture": "x64"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-debug",
+      "displayName": "Build Debug",
+      "configurePreset": "vs2022-x64-debug",
+      "configuration": "Debug",
+      "targets": ["USBPcapCMD"]
+    },
+    {
+      "name": "build-release",
+      "displayName": "Build Release",
+      "configurePreset": "vs2022-x64-release",
+      "configuration": "Release",
+      "targets": ["USBPcapCMD"]
+    }
+  ]
+}

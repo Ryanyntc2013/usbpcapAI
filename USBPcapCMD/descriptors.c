@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 Tomasz Moñ <desowin@gmail.com>
+ * Copyright (c) 2013-2018 Tomasz Moï¿½ <desowin@gmail.com>
  *
  * SPDX-License-Identifier: BSD-2-Clause
  */
@@ -275,10 +275,12 @@ write_device_descriptor_complete(descriptor_callback_context *ctx,
 
 static void
 descriptor_callback(HANDLE hub, ULONG port, USHORT deviceAddress,
+                    USHORT parentAddress,
                     PUSB_DEVICE_DESCRIPTOR desc, void *context)
 {
     descriptor_callback_context *ctx = (descriptor_callback_context *)context;
     PUSB_DESCRIPTOR_REQUEST request;
+    (void)parentAddress;
 
     if (!USBPcapIsDeviceFiltered(ctx->addresses, deviceAddress))
     {

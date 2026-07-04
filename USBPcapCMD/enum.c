@@ -36,6 +36,13 @@ typedef void (*EnumDeviceInfoCallback)(ULONG level, ULONG port, TCHAR display[MA
                                        USHORT deviceAddress, USHORT parentAddress,
                                        ULONG node, ULONG parentNode);
 
+typedef struct _enum_collect_context
+{
+    PUSBPCAP_CONNECTED_DEVICE_INFO devices;
+    size_t count;
+    size_t capacity;
+} enum_collect_context;
+
 #define IOCTL_OUTPUT_BUFFER_SIZE 1024
 
 #if DBG
@@ -837,6 +844,7 @@ EnumerateHubPorts(HANDLE hHubDevice, UCHAR NumPorts, ULONG level,
             if ((connectionInfo.ConnectionStatus == DeviceConnected) && port_callback)
             {
                 port_callback(hHubDevice, index, connectionInfo.DeviceAddress,
+                              hubAddress,
                               &connectionInfo.DeviceDescriptor, port_ctx);
             }
 
@@ -1073,4 +1081,243 @@ void enumerate_all_connected_devices(const char *filter, EnumConnectedPortCallba
         EnumerateHub(str, NULL, 0, NULL, cb, ctx);
         GlobalFree(str);
     }
+}
+
+static PTSTR lookup_device_description(PTSTR driverKeyName)
+{
+    DEVINST    devInst;
+    DEVINST    devInstNext;
+    CONFIGRET  cr;
+    ULONG      walkDone = 0;
+    ULONG      len;
+    TCHAR      buf[MAX_DEVICE_ID_LEN];
+    DWORD      sanityOuter = 0;
+    DWORD      sanityInner = 0;
+    PTSTR      result = NULL;
+
+    cr = CM_Locate_DevNode(&devInst, NULL, 0);
+    if (cr != CR_SUCCESS)
+    {
+        return NULL;
+    }
+
+    while (!walkDone)
+    {
+        if ((++sanityOuter) > LOOP_SANITY_LIMIT)
+        {
+            return NULL;
+        }
+        len = sizeof(buf) / sizeof(buf[0]);
+        cr = CM_Get_DevNode_Registry_Property(devInst,
+                                              CM_DRP_DRIVER,
+                                              NULL,
+                                              buf,
+                                              &len,
+                                              0);
+        if (cr == CR_SUCCESS)
+        {
+            if (_tcsicmp(driverKeyName, buf) == 0)
+            {
+                /* Try friendly name first, then device description as fallback. */
+                len = sizeof(buf) / sizeof(buf[0]);
+                cr = CM_Get_DevNode_Registry_PropertyW(devInst,
+                                                       CM_DRP_FRIENDLYNAME,
+                                                       NULL,
+                                                       buf,
+                                                       &len,
+                                                       0);
+                if (cr != CR_SUCCESS)
+                {
+                    len = sizeof(buf) / sizeof(buf[0]);
+                    cr = CM_Get_DevNode_Registry_PropertyW(devInst,
+                                                           CM_DRP_DEVICEDESC,
+                                                           NULL,
+                                                           buf,
+                                                           &len,
+                                                           0);
+                }
+                if (cr == CR_SUCCESS)
+                {
+                    result = (PTSTR)GlobalAlloc(GPTR, (len + 1) * sizeof(TCHAR));
+                    if (result != NULL)
+                    {
+                        memcpy(result, buf, len * sizeof(TCHAR));
+                    }
+                }
+                return result;
+            }
+        }
+        else if (cr == CR_NO_SUCH_VALUE)
+        {
+            /* No Driver name, continue. */
+        }
+        else
+        {
+            return NULL;
+        }
+
+        for (;;)
+        {
+            if ((++sanityInner) > LOOP_SANITY_LIMIT)
+            {
+                return NULL;
+            }
+            cr = CM_Get_Sibling(&devInstNext, devInst, 0);
+            if (cr == CR_SUCCESS)
+            {
+                devInst = devInstNext;
+                break;
+            }
+            else if (cr == CR_NO_SUCH_DEVNODE)
+            {
+                cr = CM_Get_Parent(&devInstNext, devInst, 0);
+                if (cr == CR_SUCCESS)
+                {
+                    devInst = devInstNext;
+                }
+                else
+                {
+                    walkDone = 1;
+                    break;
+                }
+            }
+            else
+            {
+                return NULL;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static void fill_device_description_setupapi(USHORT vid, USHORT pid, char *descBuf, size_t descBufSize)
+{
+    HDEVINFO devInfo;
+    SP_DEVINFO_DATA devInfoData;
+    DWORD idx = 0;
+    WCHAR hwId[64];
+
+    if ((descBuf == NULL) || (descBufSize == 0))
+    {
+        return;
+    }
+    descBuf[0] = '\0';
+
+    _snwprintf_s(hwId, _countof(hwId), _TRUNCATE, L"USB\\VID_%04X&PID_%04X", vid, pid);
+
+    devInfo = SetupDiGetClassDevsW(NULL, hwId, NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    if (devInfo == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+
+    devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+    while (SetupDiEnumDeviceInfo(devInfo, idx++, &devInfoData))
+    {
+        WCHAR buf[256];
+        DWORD len;
+        DWORD dataType;
+
+        /* Try friendly name first. */
+        if (SetupDiGetDeviceRegistryPropertyW(devInfo, &devInfoData,
+                                              SPDRP_FRIENDLYNAME, &dataType,
+                                              (PBYTE)buf, sizeof(buf), &len) &&
+            (buf[0] != L'\0'))
+        {
+            WideCharToMultiByte(CP_UTF8, 0, buf, -1, descBuf, (int)descBufSize, NULL, NULL);
+            SetupDiDestroyDeviceInfoList(devInfo);
+            return;
+        }
+
+        /* Fall back to device description. */
+        if (SetupDiGetDeviceRegistryPropertyW(devInfo, &devInfoData,
+                                              SPDRP_DEVICEDESC, &dataType,
+                                              (PBYTE)buf, sizeof(buf), &len) &&
+            (buf[0] != L'\0'))
+        {
+            WideCharToMultiByte(CP_UTF8, 0, buf, -1, descBuf, (int)descBufSize, NULL, NULL);
+            SetupDiDestroyDeviceInfoList(devInfo);
+            return;
+        }
+    }
+
+    SetupDiDestroyDeviceInfoList(devInfo);
+}
+
+static void collect_connected_device(HANDLE hub, ULONG port, USHORT deviceAddress,
+                                     USHORT parentAddress,
+                                     PUSB_DEVICE_DESCRIPTOR desc, void *ctx)
+{
+    enum_collect_context *context = (enum_collect_context *)ctx;
+    PUSBPCAP_CONNECTED_DEVICE_INFO tmp;
+    USB_NODE_CONNECTION_INFORMATION_EX connectionInfo;
+    DWORD bytesReturned;
+
+    if ((context == NULL) || (desc == NULL))
+    {
+        return;
+    }
+
+    if (context->count == context->capacity)
+    {
+        size_t newCapacity = (context->capacity == 0) ? 16 : (context->capacity * 2);
+        tmp = (PUSBPCAP_CONNECTED_DEVICE_INFO)realloc(context->devices,
+                                                      newCapacity * sizeof(USBPCAP_CONNECTED_DEVICE_INFO));
+        if (tmp == NULL)
+        {
+            return;
+        }
+
+        context->devices = tmp;
+        context->capacity = newCapacity;
+    }
+
+    memset(&connectionInfo, 0, sizeof(connectionInfo));
+    connectionInfo.ConnectionIndex = port;
+
+    memset(&context->devices[context->count], 0, sizeof(USBPCAP_CONNECTED_DEVICE_INFO));
+    context->devices[context->count].port = port;
+    context->devices[context->count].address = deviceAddress;
+    context->devices[context->count].parentAddress = parentAddress;
+    context->devices[context->count].vendorId = desc->idVendor;
+    context->devices[context->count].productId = desc->idProduct;
+
+    if (DeviceIoControl(hub,
+                        IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX,
+                        &connectionInfo,
+                        sizeof(connectionInfo),
+                        &connectionInfo,
+                        sizeof(connectionInfo),
+                        &bytesReturned,
+                        NULL))
+    {
+        context->devices[context->count].isHub = connectionInfo.DeviceIsHub;
+    }
+
+    /* Try to obtain a human-readable device description via SetupAPI. */
+    fill_device_description_setupapi(desc->idVendor, desc->idProduct,
+                                     context->devices[context->count].description,
+                                     sizeof(context->devices[context->count].description));
+
+    context->count++;
+}
+
+BOOL enumerate_get_connected_devices(const char *filter,
+                                     PUSBPCAP_CONNECTED_DEVICE_INFO *devices,
+                                     size_t *count)
+{
+    enum_collect_context context;
+
+    if ((devices == NULL) || (count == NULL))
+    {
+        return FALSE;
+    }
+
+    memset(&context, 0, sizeof(context));
+    enumerate_all_connected_devices(filter, collect_connected_device, &context);
+
+    *devices = context.devices;
+    *count = context.count;
+    return TRUE;
 }

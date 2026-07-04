@@ -104,13 +104,13 @@ static BOOL is_non_standard_hwid_known(LPTSTR hwid)
 }
 
 static PTSTR build_non_standard_reg_multi_sz(StringArray *a,
-                                             int *length)
+                                             DWORD *length)
 {
     PTSTR multi_sz;
     PTSTR ptr;
 
     int i;
-    int len;
+    size_t len;
 
     for (len=1, i=0; i<a->used; i++)
     {
@@ -128,11 +128,11 @@ static PTSTR build_non_standard_reg_multi_sz(StringArray *a,
         ptr += _tcslen(a->array[i]) + 1;
     }
 
-    *length = len;
+    *length = (DWORD)len;
     return multi_sz;
 }
 
-static void set_non_standard_hwids_reg_key(PTSTR multi_sz, int length)
+static void set_non_standard_hwids_reg_key(PTSTR multi_sz, DWORD length)
 {
     HKEY hkey;
     LONG regVal;
@@ -430,7 +430,7 @@ final:
 
 void init_non_standard_roothub_hwid()
 {
-    int length;
+    DWORD length;
     PTSTR multi_sz;
 
     init_string_array(&non_standard_hwids, 1);

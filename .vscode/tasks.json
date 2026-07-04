@@ -1,0 +1,120 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cmake-configure-usbpcapcmd-debug",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--preset", "vs2022-x64-debug"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake-build-usbpcapcmd-debug",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "--preset", "build-debug"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cmake-configure-usbpcapcmd-debug",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$msCompile"]
+    },
+    {
+      "label": "cmake-configure-usbpcapcmd-release",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--preset", "vs2022-x64-release"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake-build-usbpcapcmd-release",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "--preset", "build-release"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cmake-configure-usbpcapcmd-release",
+      "group": {
+        "kind": "build"
+      },
+      "problemMatcher": ["$msCompile"]
+    },
+    {
+      "label": "go-build-usbpcapai",
+      "type": "shell",
+      "command": "go",
+      "args": ["build", "./..."],
+      "options": {
+        "cwd": "${workspaceFolder}/USBPcapAI"
+      },
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "go-test-usbpcapai",
+      "type": "shell",
+      "command": "go",
+      "args": ["test", "./..."],
+      "options": {
+        "cwd": "${workspaceFolder}/USBPcapAI"
+      },
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "build-all-debug",
+      "type": "shell",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/scripts/deploy.ps1",
+        "-Config",
+        "debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "cmake-build-usbpcapcmd-debug",
+        "go-test-usbpcapai"
+      ],
+      "problemMatcher": [],
+      "group": {
+        "kind": "build"
+      }
+    },
+    {
+      "label": "build-all-release",
+      "type": "shell",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/scripts/deploy.ps1",
+        "-Config",
+        "release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "cmake-build-usbpcapcmd-release",
+        "go-test-usbpcapai"
+      ],
+      "problemMatcher": [],
+      "group": {
+        "kind": "build"
+      }
+    }
+  ]
+}

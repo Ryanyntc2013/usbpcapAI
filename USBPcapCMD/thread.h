@@ -10,6 +10,31 @@
 #include <windows.h>
 #include "USBPcap.h"
 
+#define USBPCAP_STORE_MODE_IMMEDIATE 0
+#define USBPCAP_STORE_MODE_ON_MATCH  1
+
+#define USBPCAP_TRANSFER_FILTER_UNSPECIFIED 0xFF
+
+struct app_capture_filter
+{
+    BOOLEAN enabled;
+    BOOLEAN has_vendor_id;
+    BOOLEAN has_product_id;
+    BOOLEAN has_endpoint;
+    BOOLEAN has_transfer_type;
+    USHORT vendor_id;
+    USHORT product_id;
+    UCHAR endpoint;
+    UCHAR transfer_type;
+};
+
+struct device_metadata
+{
+    BOOLEAN present;
+    USHORT vendor_id;
+    USHORT product_id;
+};
+
 struct inject_descriptors
 {
     void *descriptors;   /* Packets to inject after pcap header on capture start */
@@ -42,6 +67,16 @@ struct thread_data
 
     BOOLEAN inject_descriptors; /* TRUE if descriptors should be injected into capture. */
     struct inject_descriptors descriptors;
+
+    UINT32 duration_seconds; /* Capture duration in seconds, 0 means unlimited. */
+    UINT32 store_mode; /* USBPCAP_STORE_MODE_* */
+    BOOLEAN triggered; /* TRUE if capture storage has started. */
+    BOOLEAN output_created; /* TRUE if output file was created/written. */
+    ULONG dropped_packets; /* Application-filter dropped packet count. */
+    ULONGLONG last_flush_tick; /* Last output flush tick count. */
+
+    struct app_capture_filter app_filter;
+    struct device_metadata device_metadata[128];
 };
 
 HANDLE create_filter_read_handle(struct thread_data *data);

@@ -151,8 +151,8 @@ static BOOL find_usbpcap_filters(struct list *list,
     POBJDIR_INFORMATION info;
     PWSTR path = L"\\Device";
 
-    str.Length = wcslen(path)*2;
-    str.MaximumLength = wcslen(path)*2+2;
+    str.Length = (USHORT)(wcslen(path) * sizeof(WCHAR));
+    str.MaximumLength = (USHORT)(wcslen(path) * sizeof(WCHAR) + sizeof(WCHAR));
     str.Buffer = path;
 
     InitializeObjectAttributes(&attr,

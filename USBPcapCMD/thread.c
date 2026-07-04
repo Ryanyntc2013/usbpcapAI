@@ -13,6 +13,181 @@
 #include "iocontrol.h"
 #include "descriptors.h"
 
+typedef struct _packet_parser_context
+{
+    unsigned char *pending;
+    DWORD pending_len;
+    DWORD pending_capacity;
+    BOOLEAN have_pcap_header;
+    BOOLEAN wrote_pcap_header;
+    pcap_hdr_t pcap_header;
+} packet_parser_context;
+
+static void write_data(struct thread_data* data, LPOVERLAPPED write_overlapped,
+                       void *buffer, DWORD bytes);
+
+static BOOL ensure_pending_capacity(packet_parser_context *ctx, DWORD additional)
+{
+    DWORD required;
+    unsigned char *tmp;
+
+    if (ctx == NULL)
+    {
+        return FALSE;
+    }
+
+    required = ctx->pending_len + additional;
+    if (required <= ctx->pending_capacity)
+    {
+        return TRUE;
+    }
+
+    if (ctx->pending_capacity == 0)
+    {
+        ctx->pending_capacity = required;
+    }
+    else
+    {
+        while (ctx->pending_capacity < required)
+        {
+            ctx->pending_capacity *= 2;
+        }
+    }
+
+    tmp = (unsigned char *)realloc(ctx->pending, ctx->pending_capacity);
+    if (tmp == NULL)
+    {
+        return FALSE;
+    }
+
+    ctx->pending = tmp;
+    return TRUE;
+}
+
+static BOOL open_output_handle_if_needed(struct thread_data *data)
+{
+    if (data->write_handle != INVALID_HANDLE_VALUE)
+    {
+        return TRUE;
+    }
+
+    if (strncmp(data->filename, "-", 2) == 0)
+    {
+        data->write_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        data->output_created = TRUE;
+        return (data->write_handle != INVALID_HANDLE_VALUE);
+    }
+
+    data->write_handle = CreateFileA(data->filename,
+                                     GENERIC_WRITE,
+                                     0,
+                                     NULL,
+                                     CREATE_NEW,
+                                     FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED,
+                                     NULL);
+
+    if (data->write_handle == INVALID_HANDLE_VALUE)
+    {
+        fprintf(stderr, "Failed to create output file - %d\n", GetLastError());
+        return FALSE;
+    }
+
+    data->output_created = TRUE;
+    return TRUE;
+}
+
+static BOOL app_packet_matches(struct thread_data *data,
+                               PUSBPCAP_BUFFER_PACKET_HEADER header,
+                               DWORD bytes)
+{
+    struct app_capture_filter *filter;
+    struct device_metadata *metadata;
+
+    if (data == NULL)
+    {
+        return FALSE;
+    }
+
+    filter = &data->app_filter;
+    if (filter->enabled == FALSE)
+    {
+        return TRUE;
+    }
+
+    if ((header == NULL) || (bytes < sizeof(USBPCAP_BUFFER_PACKET_HEADER)))
+    {
+        return FALSE;
+    }
+
+    if (header->device >= 128)
+    {
+        return FALSE;
+    }
+
+    metadata = &data->device_metadata[header->device];
+
+    if (filter->has_vendor_id)
+    {
+        if ((metadata->present == FALSE) || (metadata->vendor_id != filter->vendor_id))
+        {
+            return FALSE;
+        }
+    }
+
+    if (filter->has_product_id)
+    {
+        if ((metadata->present == FALSE) || (metadata->product_id != filter->product_id))
+        {
+            return FALSE;
+        }
+    }
+
+    if (filter->has_endpoint && (header->endpoint != filter->endpoint))
+    {
+        return FALSE;
+    }
+
+    if (filter->has_transfer_type && (header->transfer != filter->transfer_type))
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL begin_output_stream(struct thread_data *data,
+                                LPOVERLAPPED write_overlapped,
+                                packet_parser_context *ctx)
+{
+    if ((data == NULL) || (ctx == NULL) || (ctx->have_pcap_header == FALSE))
+    {
+        return FALSE;
+    }
+
+    if (ctx->wrote_pcap_header)
+    {
+        return TRUE;
+    }
+
+    if (open_output_handle_if_needed(data) == FALSE)
+    {
+        data->process = FALSE;
+        return FALSE;
+    }
+
+    write_data(data, write_overlapped, &ctx->pcap_header, sizeof(ctx->pcap_header));
+    if ((ctx->pcap_header.magic_number == 0xA1B2C3D4) &&
+        (ctx->pcap_header.network == DLT_USBPCAP) &&
+        (data->descriptors.descriptors_len > 0))
+    {
+        write_data(data, write_overlapped, data->descriptors.descriptors, data->descriptors.descriptors_len);
+    }
+
+    ctx->wrote_pcap_header = TRUE;
+    data->triggered = TRUE;
+    return TRUE;
+}
+
 HANDLE create_filter_read_handle(struct thread_data *data)
 {
     HANDLE filter_handle = INVALID_HANDLE_VALUE;
@@ -110,6 +285,8 @@ finish:
 static void write_data(struct thread_data* data, LPOVERLAPPED write_overlapped,
                        void *buffer, DWORD bytes)
 {
+    ULONGLONG now;
+
     /* Write data to the end of the file. */
     write_overlapped->Offset = 0xFFFFFFFF;
     write_overlapped->OffsetHigh = 0xFFFFFFFF;
@@ -136,42 +313,147 @@ static void write_data(struct thread_data* data, LPOVERLAPPED write_overlapped,
             data->process = FALSE;
         }
     }
-    FlushFileBuffers(data->write_handle);
+
+    now = GetTickCount64();
+    if ((data->write_handle != INVALID_HANDLE_VALUE) &&
+        (GetFileType(data->write_handle) == FILE_TYPE_DISK) &&
+        ((data->last_flush_tick == 0) || ((now - data->last_flush_tick) >= 250)))
+    {
+        FlushFileBuffers(data->write_handle);
+        data->last_flush_tick = now;
+    }
     ResetEvent(write_overlapped->hEvent);
 }
 
 static void process_data(struct thread_data* data, LPOVERLAPPED write_overlapped,
+                         packet_parser_context *parser,
                          unsigned char *buffer, DWORD bytes)
 {
-    if (data->descriptors.buf_written < sizeof(pcap_hdr_t))
+    if ((data->app_filter.enabled == FALSE) && (data->store_mode == USBPCAP_STORE_MODE_IMMEDIATE))
     {
-        DWORD to_write = sizeof(pcap_hdr_t) - data->descriptors.buf_written;
-        if (to_write > bytes)
+        if (data->descriptors.buf_written < sizeof(pcap_hdr_t))
         {
-            to_write = bytes;
-        }
-        memcpy(&data->descriptors.buf[data->descriptors.buf_written], buffer, to_write);
-        data->descriptors.buf_written += to_write;
-
-        if (data->descriptors.buf_written == sizeof(pcap_hdr_t))
-        {
-            pcap_hdr_t *hdr = (pcap_hdr_t *)data->descriptors.buf;
-            write_data(data, write_overlapped, data->descriptors.buf, sizeof(pcap_hdr_t));
-            if ((hdr->magic_number == 0xA1B2C3D4) && (hdr->network == DLT_USBPCAP) && (data->descriptors.descriptors_len > 0))
+            DWORD to_write = sizeof(pcap_hdr_t) - data->descriptors.buf_written;
+            if (to_write > bytes)
             {
-                write_data(data, write_overlapped, data->descriptors.descriptors, data->descriptors.descriptors_len);
+                to_write = bytes;
+            }
+            memcpy(&data->descriptors.buf[data->descriptors.buf_written], buffer, to_write);
+            data->descriptors.buf_written += to_write;
+
+            if (data->descriptors.buf_written == sizeof(pcap_hdr_t))
+            {
+                pcap_hdr_t *hdr = (pcap_hdr_t *)data->descriptors.buf;
+                write_data(data, write_overlapped, data->descriptors.buf, sizeof(pcap_hdr_t));
+                if ((hdr->magic_number == 0xA1B2C3D4) && (hdr->network == DLT_USBPCAP) && (data->descriptors.descriptors_len > 0))
+                {
+                    write_data(data, write_overlapped, data->descriptors.descriptors, data->descriptors.descriptors_len);
+                }
+            }
+            buffer += to_write;
+            bytes -= to_write;
+
+            if (bytes == 0)
+            {
+                /* Nothing more to write */
+                return;
             }
         }
-        buffer += to_write;
-        bytes -= to_write;
 
-        if (bytes == 0)
+        write_data(data, write_overlapped, buffer, bytes);
+        return;
+    }
+
+    if (ensure_pending_capacity(parser, bytes) == FALSE)
+    {
+        fprintf(stderr, "Failed to allocate parser buffer\n");
+        data->process = FALSE;
+        return;
+    }
+
+    memcpy(parser->pending + parser->pending_len, buffer, bytes);
+    parser->pending_len += bytes;
+
+    while (data->process == TRUE)
+    {
+        if ((parser->have_pcap_header == FALSE) && (parser->pending_len >= sizeof(pcap_hdr_t)))
         {
-            /* Nothing more to write */
+            memcpy(&parser->pcap_header, parser->pending, sizeof(pcap_hdr_t));
+            memmove(parser->pending,
+                    parser->pending + sizeof(pcap_hdr_t),
+                    parser->pending_len - sizeof(pcap_hdr_t));
+            parser->pending_len -= sizeof(pcap_hdr_t);
+            parser->have_pcap_header = TRUE;
+
+            if (data->store_mode == USBPCAP_STORE_MODE_IMMEDIATE)
+            {
+                if (begin_output_stream(data, write_overlapped, parser) == FALSE)
+                {
+                    return;
+                }
+            }
+        }
+
+        if (parser->have_pcap_header == FALSE)
+        {
             return;
         }
+
+        if (parser->pending_len < sizeof(pcaprec_hdr_t))
+        {
+            return;
+        }
+
+        {
+            pcaprec_hdr_t recHeader;
+            DWORD totalLength;
+            BOOL matched;
+            PUSBPCAP_BUFFER_PACKET_HEADER packetHeader;
+
+            memcpy(&recHeader, parser->pending, sizeof(recHeader));
+            totalLength = sizeof(recHeader) + recHeader.incl_len;
+            if (parser->pending_len < totalLength)
+            {
+                return;
+            }
+
+            packetHeader = (PUSBPCAP_BUFFER_PACKET_HEADER)(parser->pending + sizeof(recHeader));
+            matched = app_packet_matches(data, packetHeader, recHeader.incl_len);
+
+            if (matched)
+            {
+                if ((data->store_mode == USBPCAP_STORE_MODE_ON_MATCH) && (data->triggered == FALSE))
+                {
+                    if (begin_output_stream(data, write_overlapped, parser) == FALSE)
+                    {
+                        return;
+                    }
+                }
+
+                if ((data->store_mode == USBPCAP_STORE_MODE_IMMEDIATE) || (data->triggered == TRUE))
+                {
+                    if ((data->store_mode == USBPCAP_STORE_MODE_IMMEDIATE) && (parser->wrote_pcap_header == FALSE))
+                    {
+                        if (begin_output_stream(data, write_overlapped, parser) == FALSE)
+                        {
+                            return;
+                        }
+                    }
+
+                    write_data(data, write_overlapped, parser->pending, totalLength);
+                }
+            }
+            else
+            {
+                data->dropped_packets++;
+            }
+
+            memmove(parser->pending,
+                    parser->pending + totalLength,
+                    parser->pending_len - totalLength);
+            parser->pending_len -= totalLength;
+        }
     }
-    write_data(data, write_overlapped, buffer, bytes);
 }
 
 DWORD WINAPI read_thread(LPVOID param)
@@ -184,12 +466,14 @@ DWORD WINAPI read_thread(LPVOID param)
     OVERLAPPED write_overlapped;
     OVERLAPPED connect_overlapped;
     OVERLAPPED write_handle_read_overlapped; /* Used to detect broken pipe. */
+    packet_parser_context parser;
     DWORD read;
     DWORD err;
     HANDLE table[5];
     int table_count = 0;
 
     memset(&table, 0, sizeof(table));
+    memset(&parser, 0, sizeof(parser));
 
     buffer = malloc(data->bufferlen);
     if (buffer == NULL)
@@ -205,7 +489,8 @@ DWORD WINAPI read_thread(LPVOID param)
         goto finish;
     }
 
-    if (data->write_handle == INVALID_HANDLE_VALUE)
+    if ((data->write_handle == INVALID_HANDLE_VALUE) &&
+        !((data->store_mode == USBPCAP_STORE_MODE_ON_MATCH) && (strncmp(data->filename, "-", 2) != 0)))
     {
         fprintf(stderr, "Thread started with invalid write handle!\n");
         goto finish;
@@ -235,7 +520,7 @@ DWORD WINAPI read_thread(LPVOID param)
     table_count++;
     table[table_count] = write_overlapped.hEvent;
     table_count++;
-    if (GetFileType(data->write_handle) == FILE_TYPE_PIPE)
+    if ((data->write_handle != INVALID_HANDLE_VALUE) && (GetFileType(data->write_handle) == FILE_TYPE_PIPE))
     {
         /* Setup dummy reads from write handle so we can detect broken pipe
          * even ifthere isn't any data read from read handle.
@@ -285,7 +570,7 @@ DWORD WINAPI read_thread(LPVOID param)
             {
                 GetOverlappedResult(data->read_handle, &read_overlapped, &read, TRUE);
                 ResetEvent(read_overlapped.hEvent);
-                process_data(data, &write_overlapped, buffer, read);
+                process_data(data, &write_overlapped, &parser, buffer, read);
                 /* Start new read. */
                 ReadFile(data->read_handle, (PVOID)buffer, data->bufferlen, &read, &read_overlapped);
             }
@@ -330,7 +615,14 @@ DWORD WINAPI read_thread(LPVOID param)
     }
 
     CancelIo(data->read_handle);
-    CancelIo(data->write_handle);
+    if (data->write_handle != INVALID_HANDLE_VALUE)
+    {
+        CancelIo(data->write_handle);
+        if (GetFileType(data->write_handle) == FILE_TYPE_DISK)
+        {
+            FlushFileBuffers(data->write_handle);
+        }
+    }
     CloseHandle(read_overlapped.hEvent);
     CloseHandle(connect_overlapped.hEvent);
     CloseHandle(write_overlapped.hEvent);
@@ -340,6 +632,14 @@ finish:
     if (buffer != NULL)
     {
         free(buffer);
+    }
+
+    {
+        if (parser.pending != NULL)
+        {
+            free(parser.pending);
+            parser.pending = NULL;
+        }
     }
 
     /* Notify main thread that we are done.
