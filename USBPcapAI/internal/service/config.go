@@ -21,17 +21,19 @@ type Config struct {
 	MaxFileSizeBytes   int64  `json:"maxFileSizeBytes,omitempty"`
 	MaxHistoryTasks    int    `json:"maxHistoryTasks,omitempty"`
 	MaxCaptureFiles    int    `json:"maxCaptureFiles,omitempty"`
+	HistoryTaskTTLMinutes int `json:"historyTaskTTLMinutes,omitempty"`
 }
 
 func DefaultConfig(exePath string) Config {
 	base := filepath.Dir(exePath)
 	return Config{
 		CaptureDir:         filepath.Join(base, "captures"),
-		CMDPath:            filepath.Join(base, "USBPcapCMD.exe"),
+		CMDPath:            filepath.Join(base, "USBPcapCap.exe"),
 		IdleTimeoutSeconds: 30,
 		MaxFileSizeBytes:   100 * 1024 * 1024,
 		MaxHistoryTasks:    20,
 		MaxCaptureFiles:    50,
+		HistoryTaskTTLMinutes: 60,
 	}
 }
 
@@ -78,16 +80,16 @@ func SaveConfig(exePath string, cfg Config) error {
 
 func (c Config) Validate() error {
 	if c.CMDPath == "" {
-		return errors.New("USBPcapCMD.exe path is empty")
+		return errors.New("USBPcapCap.exe path is empty")
 	}
 	if c.CaptureDir == "" {
 		return errors.New("capture dir is empty")
 	}
 	if !filepath.IsAbs(c.CMDPath) {
-		return errors.New("USBPcapCMD.exe path must be absolute")
+		return errors.New("USBPcapCap.exe path must be absolute")
 	}
-	if !strings.EqualFold(filepath.Base(c.CMDPath), "USBPcapCMD.exe") {
-		return errors.New("cmdPath must point to USBPcapCMD.exe")
+	if !strings.EqualFold(filepath.Base(c.CMDPath), "USBPcapCap.exe") {
+		return errors.New("cmdPath must point to USBPcapCap.exe")
 	}
 	st, err := os.Stat(c.CMDPath)
 	if err != nil {

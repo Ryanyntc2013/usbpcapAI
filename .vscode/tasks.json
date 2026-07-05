@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "cmake-configure-usbpcapcmd-debug",
+      "label": "cmake-configure-usbpcapcap-debug",
       "type": "shell",
       "command": "cmake",
       "args": ["--preset", "vs2022-x64-debug"],
@@ -12,14 +12,14 @@
       "problemMatcher": []
     },
     {
-      "label": "cmake-build-usbpcapcmd-debug",
+      "label": "cmake-build-usbpcapcap-debug",
       "type": "shell",
       "command": "cmake",
       "args": ["--build", "--preset", "build-debug"],
       "options": {
         "cwd": "${workspaceFolder}"
       },
-      "dependsOn": "cmake-configure-usbpcapcmd-debug",
+      "dependsOn": "cmake-configure-usbpcapcap-debug",
       "group": {
         "kind": "build",
         "isDefault": true
@@ -27,7 +27,7 @@
       "problemMatcher": ["$msCompile"]
     },
     {
-      "label": "cmake-configure-usbpcapcmd-release",
+      "label": "cmake-configure-usbpcapcap-release",
       "type": "shell",
       "command": "cmake",
       "args": ["--preset", "vs2022-x64-release"],
@@ -37,14 +37,14 @@
       "problemMatcher": []
     },
     {
-      "label": "cmake-build-usbpcapcmd-release",
+      "label": "cmake-build-usbpcapcap-release",
       "type": "shell",
       "command": "cmake",
       "args": ["--build", "--preset", "build-release"],
       "options": {
         "cwd": "${workspaceFolder}"
       },
-      "dependsOn": "cmake-configure-usbpcapcmd-release",
+      "dependsOn": "cmake-configure-usbpcapcap-release",
       "group": {
         "kind": "build"
       },
@@ -85,7 +85,7 @@
         "cwd": "${workspaceFolder}"
       },
       "dependsOn": [
-        "cmake-build-usbpcapcmd-debug",
+        "cmake-build-usbpcapcap-debug",
         "go-test-usbpcapai"
       ],
       "problemMatcher": [],
@@ -108,7 +108,53 @@
         "cwd": "${workspaceFolder}"
       },
       "dependsOn": [
-        "cmake-build-usbpcapcmd-release",
+        "cmake-build-usbpcapcap-release",
+        "go-test-usbpcapai"
+      ],
+      "problemMatcher": [],
+      "group": {
+        "kind": "build"
+      }
+    },
+    {
+      "label": "package-mcp-release",
+      "type": "shell",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/scripts/package.ps1",
+        "-Config",
+        "release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "cmake-build-usbpcapcap-release",
+        "go-test-usbpcapai"
+      ],
+      "problemMatcher": [],
+      "group": {
+        "kind": "build"
+      }
+    },
+    {
+      "label": "package-mcp-debug",
+      "type": "shell",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/scripts/package.ps1",
+        "-Config",
+        "debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": [
+        "cmake-build-usbpcapcap-debug",
         "go-test-usbpcapai"
       ],
       "problemMatcher": [],

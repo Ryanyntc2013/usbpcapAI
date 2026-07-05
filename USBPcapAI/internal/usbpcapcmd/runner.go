@@ -38,6 +38,21 @@ type CaptureResult struct {
 	Reason         string              `json:"reason,omitempty"`
 }
 
+// CmdError represents a structured error returned by USBPcapCMD in JSON.
+// It preserves the original errorCode/message/hint from the C-side output.
+type CmdError struct {
+	ErrorCode string
+	Message   string
+	Hint      string
+}
+
+func (e *CmdError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("[%s] %s", e.ErrorCode, e.Message)
+	}
+	return fmt.Sprintf("[%s]", e.ErrorCode)
+}
+
 func (r Runner) ListInterfaces() ([]ipc.InterfaceInfo, error) {
 	out, err := r.run("--list-interfaces", "--json", "--no-interactive")
 	if err != nil {
@@ -58,6 +73,10 @@ func (r Runner) ListDevices(iface string) ([]ipc.DeviceInfo, error) {
 	var resp CaptureResult
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return nil, err
+	}
+	// Populate AddressHex from Address
+	for i := range resp.Devices {
+		resp.Devices[i].AddressHex = fmt.Sprintf("0x%04x", resp.Devices[i].Address)
 	}
 	return resp.Devices, nil
 }
@@ -86,7 +105,12 @@ func (r Runner) CaptureContext(ctx context.Context, req ipc.Request, outputPath 
 	if req.CaptureNewDevices {
 		args = append(args, "--capture-from-new-devices")
 	}
-	if !req.CaptureNewDevices && strings.TrimSpace(req.VendorID) == "" && strings.TrimSpace(req.ProductID) == "" {
+	// Always add -A to capture from all devices on the interface.
+	// VID/PID filtering is handled separately via --vendor-id/--product-id
+	// as application-layer (user-mode) filters after capture.
+	// Without -A, USBPcapCMD produces empty captures for devices with
+	// only intermittent or idle traffic.
+	if !req.CaptureNewDevices {
 		args = append(args, "-A")
 	}
 	if req.AppFilter {
@@ -110,11 +134,11 @@ func (r Runner) CaptureContext(ctx context.Context, req ipc.Request, outputPath 
 		return nil, err
 	}
 	if !resp.OK {
-		msg := resp.Message
-		if msg == "" {
-			msg = resp.ErrorCode
+		return nil, &CmdError{
+			ErrorCode: resp.ErrorCode,
+			Message:   resp.Message,
+			Hint:      resp.Hint,
 		}
-		return nil, fmt.Errorf("usbpcapcmd failed: %s", msg)
 	}
 	return &resp, nil
 }

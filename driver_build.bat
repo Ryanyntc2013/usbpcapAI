@@ -36,8 +36,8 @@ CALL config.bat
 build -ceZg
 if exist build%BUILD_ALT_DIR%.err goto error
 
-::Sign the USBPcapCMD.exe, it is not critical so do not fail on error
-%_USBPCAP_SIGNTOOL% %_USBPCAP_SIGN_OPTS_SHA256% USBPcapCMD\obj%BUILD_ALT_DIR%\%USBPcap_arch%\USBPcapCMD.exe
+::Sign the USBPcapCap.exe, it is not critical so do not fail on error
+%_USBPCAP_SIGNTOOL% %_USBPCAP_SIGN_OPTS_SHA256% USBPcapCMD\obj%BUILD_ALT_DIR%\%USBPcap_arch%\USBPcapCap.exe
 
 %_USBPCAP_SIGNTOOL% %_USBPCAP_SIGN_OPTS_SHA256% USBPcapDriver\obj%BUILD_ALT_DIR%\%USBPcap_arch%\USBPcap.sys
 if errorlevel 1 goto error

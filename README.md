@@ -66,7 +66,7 @@ usbpcap/
 ### 构建
 
 ```powershell
-# 1. 构建 USBPcapCMD（CMake）
+# 1. 构建 USBPcapCap（CMake）
 cmake --preset vs2022-x64-debug
 cmake --build --preset build-debug
 
@@ -185,7 +185,7 @@ usbpcap/
 ### Build
 
 ```powershell
-# 1. Build USBPcapCMD (CMake)
+# 1. Build USBPcapCap (CMake)
 cmake --preset vs2022-x64-debug
 cmake --build --preset build-debug
 

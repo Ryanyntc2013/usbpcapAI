@@ -4,7 +4,7 @@ End-user installer is available at: http://desowin.org/usbpcap
 Following informations are intended for developers and power users only.
 
 Directory overview:
-  USBPcapCMD - sample user space application
+  USBPcapCap - sample user space application
   USBPcapDriver - filter driver used to capture data
 
 Build instructions:
@@ -39,10 +39,10 @@ Installation:
 
 Usage:
   Currently there is no capture engine dll.
-  You can use the USBPcapCMD.exe to select the filter instance (there is one
+  You can use the USBPcapCap.exe to select the filter instance (there is one
   instance per root hub) and specify the output pcap file name.
 
 Licensing:
   USBPcapDriver is licensed under GPLv2 license.
-  USBPcapCMD is licensed under BSD 2-Clause license.
+  USBPcapCap is licensed under BSD 2-Clause license.
 

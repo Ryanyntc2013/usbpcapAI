@@ -104,9 +104,9 @@ func Summarize(path string) (*ipc.Summary, error) {
 		}
 		var uh usbpcapHeader
 		uh.HeaderLen = binary.LittleEndian.Uint16(buf[0:2])
-		uh.Device = binary.LittleEndian.Uint16(buf[17:19])
-		uh.Endpoint = buf[19]
-		uh.Transfer = buf[20]
+		uh.Device = binary.LittleEndian.Uint16(buf[19:21])
+		uh.Endpoint = buf[21]
+		uh.Transfer = buf[22]
 		switch uh.Transfer {
 		case 0:
 			summary.TransferTypes["isochronous"]++

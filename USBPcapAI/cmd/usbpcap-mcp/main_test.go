@@ -6,37 +6,29 @@ package main
 
 import "testing"
 
-func TestToolDefinitionsIncludeConfigAndStop(t *testing.T) {
+func TestToolDefinitionsIncludeAll(t *testing.T) {
 	defs := toolDefinitions()
-	foundConfig := false
-	foundStop := false
-	foundStart := false
-	foundGetTask := false
+	names := make(map[string]bool)
 	for _, def := range defs {
-		if def["name"] == "usbpcap_get_config" {
-			foundConfig = true
-		}
-		if def["name"] == "usbpcap_stop_capture" {
-			foundStop = true
-		}
-		if def["name"] == "usbpcap_start_capture" {
-			foundStart = true
-		}
-		if def["name"] == "usbpcap_get_capture_task" {
-			foundGetTask = true
+		name, _ := def["name"].(string)
+		names[name] = true
+	}
+	required := []string{
+		"usbpcap_get_config", "usbpcap_stop_capture", "usbpcap_start_capture",
+		"usbpcap_get_capture_task", "usbpcap_probe_device", "usbpcap_smart_capture",
+		"usbpcap_wait_capture_task", "usbpcap_list_interfaces", "usbpcap_list_devices",
+		"usbpcap_capture_once", "usbpcap_capture_status", "usbpcap_list_capture_tasks",
+		"usbpcap_help", "usbpcap_analyze", "usbpcap_diagnose_capture",
+		"usbpcap_profile_device", "usbpcap_export_data",
+		"usbpcap_install_guide", "usbpcap_service_control",
+	}
+	for _, name := range required {
+		if !names[name] {
+			t.Fatalf("required tool %q not found", name)
 		}
 	}
-	if !foundConfig {
-		t.Fatal("usbpcap_get_config not found")
-	}
-	if !foundStop {
-		t.Fatal("usbpcap_stop_capture not found")
-	}
-	if !foundStart {
-		t.Fatal("usbpcap_start_capture not found")
-	}
-	if !foundGetTask {
-		t.Fatal("usbpcap_get_capture_task not found")
+	if len(defs) < 16 {
+		t.Fatalf("expected at least 14 tool definitions, got %d", len(defs))
 	}
 }
 

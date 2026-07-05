@@ -37,8 +37,8 @@
         <Directory Id="TARGETDIR" Name="SourceDir">
             <Directory Id="$(var.PlatformProgramFilesFolder)">
                 <Directory Id="INSTALLLOCATION" Name="USBPcap">
-                    <Component Id="USBPcapCMD" Guid="FA489489-8302-4226-8FAA-B09521C720A2" Location="local">
-                        <File Id="USBPcapCMD.exe" Name="USBPcapCMD.exe" Source="..\Release\USBPcapCMD_$(var.Platform).exe" Vital="yes" />
+                    <Component Id="USBPcapCap" Guid="FA489489-8302-4226-8FAA-B09521C720A2" Location="local">
+                        <File Id="USBPcapCap.exe" Name="USBPcapCap.exe" Source="..\Release\USBPcapCap_$(var.Platform).exe" Vital="yes" />
                     </Component>
                     <Component Id="USBPcapXPDriver" Guid="A20B05A1-E38E-4D6F-8EF1-B8139099DC4C" Location="local" Transitive="yes">
                         <Condition>VersionNT &gt;= 501 AND VersionNT &lt; 600</Condition>
@@ -79,13 +79,13 @@
             <ComponentRef Id="USBPcap7Driver" />
             <ComponentRef Id="USBPcap8Driver" />
         </Feature>
-        <Feature Id="USBPcapCMD" Level="1" Absent="disallow" Title="USBPcapCMD" ConfigurableDirectory="INSTALLLOCATION" AllowAdvertise="no" InstallDefault="local">
-            <ComponentRef Id="USBPcapCMD" />
+        <Feature Id="USBPcapCap" Level="1" Absent="disallow" Title="USBPcapCap" ConfigurableDirectory="INSTALLLOCATION" AllowAdvertise="no" InstallDefault="local">
+            <ComponentRef Id="USBPcapCap" />
         </Feature>
         <Feature Id="DetectUSB3Feature" Level="1" Title="Detect USB3" AllowAdvertise="no" InstallDefault="local">
             <ComponentRef Id="DetectUSB3" />
         </Feature>
-        <CustomAction Id="DetectUSB3" Directory="INSTALLLOCATION" Execute="deferred" ExeCommand="&quot;[INSTALLLOCATION]USBPcapCMD.exe&quot; &quot;-I&quot;" Impersonate="no" />
+        <CustomAction Id="DetectUSB3" Directory="INSTALLLOCATION" Execute="deferred" ExeCommand="&quot;[INSTALLLOCATION]USBPcapCap.exe&quot; &quot;-I&quot;" Impersonate="no" />
         <CustomAction Id="InstallDriver" Directory="INSTALLLOCATION" Execute="deferred" ExeCommand="[SystemFolder]RUNDLL32.EXE SETUPAPI.DLL,InstallHinfSection DefaultInstall 128 .\USBPcap.inf" Impersonate="no" />
         <CustomAction Id="UninstallDriver" Directory="INSTALLLOCATION" Execute="deferred" ExeCommand="[SystemFolder]RUNDLL32.EXE SETUPAPI.DLL,InstallHinfSection DefaultUninstall 128 .\USBPcap.inf" Impersonate="no" />
         <InstallExecuteSequence>

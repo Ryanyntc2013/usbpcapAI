@@ -2169,22 +2169,22 @@ static void print_help(const char *topic)
     if ((topic != NULL) && (_stricmp(topic, "examples") == 0))
     {
         printf("Examples:\n"
-               "  USBPcapCMD.exe --list-interfaces --json\n"
-               "  USBPcapCMD.exe --list-devices --json\n"
-               "  USBPcapCMD.exe --list-devices --interface \\\\.\\USBPcap2 --json\n"
-               "  USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --output out.pcap --duration 10 --json --no-interactive\n"
-               "  USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --endpoint 0x81 --app-filter --store-mode on-match --output monitor.pcap --duration 3600 --json --no-interactive\n");
+               "  USBPcapCap.exe --list-interfaces --json\n"
+               "  USBPcapCap.exe --list-devices --json\n"
+               "  USBPcapCap.exe --list-devices --interface \\\\.\\USBPcap2 --json\n"
+               "  USBPcapCap.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --output out.pcap --duration 10 --json --no-interactive\n"
+               "  USBPcapCap.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --endpoint 0x81 --app-filter --store-mode on-match --output monitor.pcap --duration 3600 --json --no-interactive\n");
         return;
     }
 
     if (zh)
     {
-        printf("用法：USBPcapCMD.exe [选项]\n"
+        printf("用法：USBPcapCap.exe [选项]\n"
                "  示例：\n"
                "  1. 指定 VID/PID 捕获一段文件：\n"
-               "    USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --json --no-interactive\n"
+               "    USBPcapCap.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --json --no-interactive\n"
                "  2. 在上例基础上增加时长限制（30 秒自动停止）：\n"
-               "    USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --duration 30 --json --no-interactive\n"
+               "    USBPcapCap.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --duration 30 --json --no-interactive\n"
                "  --------------------------------------------------\n"
                "  新增选项：\n"
                "  --list-devices [--interface <name>]\n"
@@ -2248,12 +2248,12 @@ static void print_help(const char *topic)
     }
     else
     {
-        printf("Usage: USBPcapCMD.exe [options]\n"
+        printf("Usage: USBPcapCap.exe [options]\n"
                "  Examples:\n"
                "  1. Capture with VID/PID filter:\n"
-               "    USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --json --no-interactive\n"
+               "    USBPcapCap.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --json --no-interactive\n"
                "  2. Add duration limit (auto-stop after 30s):\n"
-               "    USBPcapCMD.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --duration 30 --json --no-interactive\n"
+               "    USBPcapCap.exe -d \\\\.\\USBPcap2 --vid 0x1d57 --pid 0xfa60 -o capture.pcap --duration 30 --json --no-interactive\n"
                "  --------------------------------------------------\n"
                "  New options:\n"
                "  --list-devices [--interface <name>]\n"
@@ -2588,7 +2588,7 @@ int __cdecl main(int argc, CHAR **argv)
 
             case ':':
             case '?':
-                fprintf(stderr, "Try 'USBPcapCMD.exe --help' for more information.\n");
+                fprintf(stderr, "Try 'USBPcapCap.exe --help' for more information.\n");
                 return -1;
 
             default:
@@ -2660,7 +2660,7 @@ int __cdecl main(int argc, CHAR **argv)
                 {
                     print_json_error("AUTO_INTERFACE_NOT_UNIQUE",
                                      "Unable to auto-select a unique USBPcap interface for the requested VID/PID.",
-                                     "Run USBPcapCMD.exe --list-interfaces --json and USBPcapCMD.exe --list-devices --device <name> --json.");
+                                     "Run USBPcapCap.exe --list-interfaces --json and USBPcapCap.exe --list-devices --device <name> --json.");
                 }
                 else
                 {
@@ -2697,7 +2697,7 @@ int __cdecl main(int argc, CHAR **argv)
                 {
                     print_json_error("NO_MATCHED_DEVICE",
                                      "No connected USB device matched the requested VID/PID.",
-                                     "Run USBPcapCMD.exe --list-devices --device <name> --json to inspect current devices.");
+                                     "Run USBPcapCap.exe --list-devices --device <name> --json to inspect current devices.");
                 }
                 else
                 {

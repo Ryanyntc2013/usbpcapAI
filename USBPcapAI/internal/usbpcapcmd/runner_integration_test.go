@@ -15,8 +15,8 @@ import (
 func findCMDExe(t *testing.T) string {
 	t.Helper()
 	candidates := []string{
-		filepath.Join("..", "..", "..", "out", "build", "vs2022-x64-debug", "bin", "Debug", "USBPcapCMD.exe"),
-		filepath.Join("..", "..", "out", "build", "vs2022-x64-debug", "bin", "Debug", "USBPcapCMD.exe"),
+		filepath.Join("..", "..", "..", "out", "build", "vs2022-x64-debug", "bin", "Debug", "USBPcapCap.exe"),
+		filepath.Join("..", "..", "out", "build", "vs2022-x64-debug", "bin", "Debug", "USBPcapCap.exe"),
 	}
 	for _, rel := range candidates {
 		abs, err := filepath.Abs(rel)
@@ -27,7 +27,7 @@ func findCMDExe(t *testing.T) string {
 			return abs
 		}
 	}
-	t.Skip("USBPcapCMD.exe not found; build it first with cmake --build --preset build-debug")
+	t.Skip("USBPcapCap.exe not found; build it first with cmake --build --preset build-debug")
 	return ""
 }
 

@@ -10,14 +10,14 @@ set(USBPCAPCMD_SOURCES
     thread.c
 )
 
-add_executable(USBPcapCMD WIN32 ${USBPCAPCMD_SOURCES})
+add_executable(USBPcapCap WIN32 ${USBPCAPCMD_SOURCES})
 
-target_include_directories(USBPcapCMD PRIVATE
+target_include_directories(USBPcapCap PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/USBPcapDriver/include
 )
 
-target_link_libraries(USBPcapCMD PRIVATE
+target_link_libraries(USBPcapCap PRIVATE
     hid
     setupapi
     comdlg32
@@ -28,11 +28,11 @@ target_link_libraries(USBPcapCMD PRIVATE
 )
 
 if(MSVC)
-    target_compile_definitions(USBPcapCMD PRIVATE _CRT_NON_CONFORMING_SWPRINTFS)
-    target_compile_options(USBPcapCMD PRIVATE /W3)
-    target_link_options(USBPcapCMD PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'")
+    target_compile_definitions(USBPcapCap PRIVATE _CRT_NON_CONFORMING_SWPRINTFS)
+    target_compile_options(USBPcapCap PRIVATE /W3)
+    target_link_options(USBPcapCap PRIVATE "/MANIFESTUAC:level='asInvoker' uiAccess='false'")
 endif()
 
-set_target_properties(USBPcapCMD PROPERTIES
+set_target_properties(USBPcapCap PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )

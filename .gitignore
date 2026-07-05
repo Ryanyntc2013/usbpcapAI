@@ -1,0 +1,60 @@
+# ── Build Outputs ──────────────────────────────────────────
+out/
+output/
+
+# ── Go ──────────────────────────────────────────────────────
+USBPcapAI/usbpcap-mcp*
+USBPcapAI/vendor/
+*.exe
+
+# ── Visual Studio / MSVC ────────────────────────────────────
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.db
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+Debug/
+Release/
+x64/
+x86/
+*.ipch
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+
+# ── Windows Driver Kit ──────────────────────────────────────
+sys/
+objfre_*
+objchk_*
+
+# ── Installer Outputs ───────────────────────────────────────
+*.msi
+nsis/*.exe
+wix/*.wixobj
+wix/*.wixpdb
+
+# ── Captures (user data) ────────────────────────────────────
+captures/*.pcap
+
+# ── IDE / Editor ────────────────────────────────────────────
+.vscode/settings.json
+.gitnexus/
+
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Logs ────────────────────────────────────────────────────
+*.log
+
+# ── OS Artifacts ────────────────────────────────────────────
+Thumbs.db
+Desktop.ini

@@ -19,7 +19,7 @@ BEGIN
             VALUE "FileVersion",      USBPCAPCMD_VERSION_STR
             VALUE "InternalName",     "USBPcap"
             VALUE "LegalCopyright",   "(c) 2013-2020 Tomasz Mon"
-            VALUE "OriginalFilename", "USBPcapCMD.exe"
+            VALUE "OriginalFilename", "USBPcapCap.exe"
             VALUE "ProductName",      "USBPcap"
             VALUE "ProductVersion",   USBPCAPCMD_VERSION_STR
         END

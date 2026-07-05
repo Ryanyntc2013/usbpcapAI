@@ -66,7 +66,7 @@ PageEx license
 PageExEnd
 
 PageEx license
-  LicenseText "USBPcapCMD license"
+  LicenseText "USBPcapCap license"
   LicenseData bsd-2clause.txt
   LicenseForceSelection checkbox
 PageExEnd
@@ -253,14 +253,14 @@ Section "USBPcap Driver" SEC_USBPCAPDRIVER
 !endif
 SectionEnd
 
-Section "USBPcapCMD" SEC_USBPCAPCMD
+Section "USBPcapCap" SEC_USBPCAPCMD
   SectionIn 1 RO
   SetOutPath "$INSTDIR"
 
   ${If} ${RunningX64}
-    File /oname=USBPcapCMD.exe "..\Release\USBPcapCMD_x64.exe"
+    File /oname=USBPcapCap.exe "..\Release\USBPcapCap_x64.exe"
   ${Else}
-    File /oname=USBPcapCMD.exe "..\Release\USBPcapCMD_x86.exe"
+    File /oname=USBPcapCap.exe "..\Release\USBPcapCap_x86.exe"
   ${EndIf}
 
   ${If} $restore_point_success == "yes"
@@ -276,7 +276,7 @@ SectionEnd
 Section "Detect USB 3.0" SEC_USB3
   SectionIn 1
 
-  Exec '"$INSTDIR\USBPcapCMD.exe" -I'
+  Exec '"$INSTDIR\USBPcapCap.exe" -I'
 SectionEnd
 
 Function .onSelChange
@@ -306,9 +306,9 @@ Section "Uninstall"
     Delete $INSTDIR\USBPcapx86.cat
   ${EndIf}
 
-  IfFileExists $INSTDIR\USBPcapCMD.exe CMDExists PastCMDCheck
+  IfFileExists $INSTDIR\USBPcapCap.exe CMDExists PastCMDCheck
   CMDExists:
-    Delete $INSTDIR\USBPcapCMD.exe
+    Delete $INSTDIR\USBPcapCap.exe
   PastCMDCheck:
   RMDir /REBOOTOK $INSTDIR
 

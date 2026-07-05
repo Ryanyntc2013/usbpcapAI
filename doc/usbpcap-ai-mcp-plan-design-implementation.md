@@ -1,8 +1,8 @@
-# USBPcapCMD AI 抓包能力改造计划、设计及实现方案
+# USBPcapCap AI 抓包能力改造计划、设计及实现方案
 
 ## 1. 目标
 
-将现有 `USBPcapCMD` 改造为更适合本机 AI 工具调用的 USB 抓包能力底座，并新增 Go 实现的本机 MCP 与服务层。
+将现有 `USBPcapCap` 改造为更适合本机 AI 工具调用的 USB 抓包能力底座，并新增 Go 实现的本机 MCP 与服务层。
 
 核心目标：
 
@@ -12,7 +12,7 @@
 4. 支持可选附带抓取新插入的任意设备。
 5. 抓包时不弹 UAC，改为 Windows Service 模式运行。
 6. MCP 返回 pcap 文件路径、摘要信息和简要解析结果。
-7. 修复 `USBPcapCMD` 在终端、管道、PowerShell、AI 调用场景下的乱码问题。
+7. 修复 `USBPcapCap` 在终端、管道、PowerShell、AI 调用场景下的乱码问题。
 8. 保留并扩展应用层 VID/PID/endpoint 过滤能力，便于不改驱动时逐步增强过滤策略。
 9. 支持“命中条件后才开始写盘”的触发式存储，便于长时间监测。
 10. 提供充分、清晰、机器友好的命令行帮助与错误提示。
@@ -67,7 +67,7 @@
 为保证可扩展性，过滤分为两层：
 
 1. 驱动层过滤：使用现有 address filter，减少无关设备进入用户态。
-2. 应用层过滤：在 `USBPcapCMD` 读取到 pcap/USBPcap packet 后，再按 VID、PID、endpoint、transfer type 等条件决定是否写入文件或触发开始存储。
+2. 应用层过滤：在 `USBPcapCap` 读取到 pcap/USBPcap packet 后，再按 VID、PID、endpoint、transfer type 等条件决定是否写入文件或触发开始存储。
 
 第一阶段的精确 VID/PID 已连接设备过滤仍优先通过“VID/PID -> address list -> 驱动 address filter”实现。应用层 VID/PID 过滤作为保留能力，主要用于：
 
@@ -101,7 +101,7 @@
 三个用户态 exe 可以放在任意目录：
 
 ```text
-USBPcapCMD.exe
+USBPcapCap.exe
 USBPcapService.exe
 USBPcapMCP.exe
 ```
@@ -111,7 +111,7 @@ USBPcapMCP.exe
 | 项目 | 是否可便携 | 说明 |
 | --- | --- | --- |
 | `USBPcapMCP.exe` | 是 | 本机 AI 工具直接调用 |
-| `USBPcapCMD.exe` | 是 | 依赖系统中已安装并可用的 USBPcap 驱动 |
+| `USBPcapCap.exe` | 是 | 依赖系统中已安装并可用的 USBPcap 驱动 |
 | `USBPcapService.exe` | exe 可便携 | 作为服务运行前需要注册服务 |
 | `USBPcapDriver.sys` | 否 | 必须安装到系统并生效 |
 | 抓包时无 UAC | 是 | 前提是服务已安装并运行 |
@@ -134,7 +134,7 @@ USBPcapMCP.exe         Go
         v
 USBPcapService.exe     Go，Windows Service，LocalSystem
   - 抓包任务管理
-  - 启动/停止 USBPcapCMD
+  - 启动/停止 USBPcapCap
   - 输出目录控制
   - 超时控制
   - 触发式存储策略
@@ -142,7 +142,7 @@ USBPcapService.exe     Go，Windows Service，LocalSystem
         |
         | 子进程调用
         v
-USBPcapCMD.exe         C
+USBPcapCap.exe         C
   - USBPcap 设备枚举
   - VID/PID -> deviceAddress
   - 应用层 VID/PID/endpoint 过滤
@@ -160,7 +160,7 @@ USBPcapDriver.sys
 
 ## 5. 组件设计
 
-### 5.1 `USBPcapCMD.exe`
+### 5.1 `USBPcapCap.exe`
 
 职责：
 
@@ -197,12 +197,12 @@ USBPcapDriver.sys
 示例：
 
 ```powershell
-USBPcapCMD.exe --list-interfaces --json
-USBPcapCMD.exe --list-devices --device \\.\USBPcap1 --json
-USBPcapCMD.exe --device \\.\USBPcap1 --vendor-id 0x1234 --output out.pcap --duration 10 --json
-USBPcapCMD.exe --auto-interface --vendor-id 0x1234 --output out.pcap --duration 10 --json
-USBPcapCMD.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --app-filter --output out.pcap --duration 60 --json
-USBPcapCMD.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --store-mode on-match --output out.pcap --duration 3600 --json
+USBPcapCap.exe --list-interfaces --json
+USBPcapCap.exe --list-devices --device \\.\USBPcap1 --json
+USBPcapCap.exe --device \\.\USBPcap1 --vendor-id 0x1234 --output out.pcap --duration 10 --json
+USBPcapCap.exe --auto-interface --vendor-id 0x1234 --output out.pcap --duration 10 --json
+USBPcapCap.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --app-filter --output out.pcap --duration 60 --json
+USBPcapCap.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --store-mode on-match --output out.pcap --duration 3600 --json
 ```
 
 #### 5.1.1 JSON 接口
@@ -350,7 +350,7 @@ driver read
 长时间监测推荐命令：
 
 ```powershell
-USBPcapCMD.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --app-filter --store-mode on-match --duration 86400 --output monitor.pcap --json --no-interactive
+USBPcapCap.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --app-filter --store-mode on-match --duration 86400 --output monitor.pcap --json --no-interactive
 ```
 
 返回结果需要区分未触发和已触发：
@@ -379,11 +379,11 @@ USBPcapCMD.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --app-fi
 建议支持：
 
 ```powershell
-USBPcapCMD.exe --help
-USBPcapCMD.exe --help capture
-USBPcapCMD.exe --help filter
-USBPcapCMD.exe --help json
-USBPcapCMD.exe --help examples
+USBPcapCap.exe --help
+USBPcapCap.exe --help capture
+USBPcapCap.exe --help filter
+USBPcapCap.exe --help json
+USBPcapCap.exe --help examples
 ```
 
 帮助内容要求：
@@ -402,7 +402,7 @@ USBPcapCMD.exe --help examples
   "ok": false,
   "errorCode": "NO_MATCHED_DEVICE",
   "message": "No connected USB device matched vendorId=0x1234 productId=any on \\\\.\\USBPcap1.",
-  "hint": "Run USBPcapCMD.exe --list-devices --device \\\\.\\USBPcap1 --json to inspect current devices."
+  "hint": "Run USBPcapCap.exe --list-devices --device \\\\.\\USBPcap1 --json to inspect current devices."
 }
 ```
 
@@ -416,7 +416,7 @@ USBPcapCMD.exe --help examples
 
 1. 接收本机 IPC 请求。
 2. 校验请求参数。
-3. 启动 `USBPcapCMD.exe` 执行抓包。
+3. 启动 `USBPcapCap.exe` 执行抓包。
 4. 管理抓包任务生命周期。
 5. 控制输出目录，避免任意路径写入。
 6. 抓包结束后解析 pcap 生成摘要。
@@ -436,7 +436,7 @@ USBPcapService.exe run
 服务启动后默认从自身所在目录寻找：
 
 ```text
-USBPcapCMD.exe
+USBPcapCap.exe
 ```
 
 也可通过配置指定绝对路径。
@@ -566,7 +566,7 @@ USBPcapAI/
 
 ```text
 usbpcap-ai/
-  USBPcapCMD.exe
+  USBPcapCap.exe
   USBPcapService.exe
   USBPcapMCP.exe
   config.json
@@ -580,7 +580,7 @@ usbpcap-ai/
 3. Service 不开放 TCP 端口，默认只用 Named Pipe。
 4. 所有输出文件限制在 configured capture directory。
 5. 禁止请求直接传入任意命令行片段。
-6. `USBPcapCMD` 参数由 Go 层按白名单拼接，不做 shell 拼接。
+6. `USBPcapCap` 参数由 Go 层按白名单拼接，不做 shell 拼接。
 7. 限制最大抓包时长、最大缓冲区、最大输出文件大小。
 8. 日志中不记录敏感 payload 内容，仅记录任务元数据。
 9. 触发式存储默认不写入未命中流量，降低长期监测中意外保存敏感数据的风险。
@@ -606,7 +606,7 @@ Go 层读取 pcap 文件头和 USBPcap packet header，生成轻量摘要。
 
 ## 9. 实施计划
 
-### 阶段 1：`USBPcapCMD` 命令行现代化
+### 阶段 1：`USBPcapCap` 命令行现代化
 
 目标：让 C 程序先成为稳定、可脚本调用的抓包 CLI。
 
@@ -628,10 +628,10 @@ Go 层读取 pcap 文件头和 USBPcap packet header，生成轻量摘要。
 验收：
 
 ```powershell
-USBPcapCMD.exe --list-interfaces --json
-USBPcapCMD.exe --list-devices --device \\.\USBPcap1 --json
-USBPcapCMD.exe --device \\.\USBPcap1 --vendor-id 0x1234 --output out.pcap --duration 5 --json --no-interactive
-USBPcapCMD.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --app-filter --store-mode on-match --output out.pcap --duration 3600 --json --no-interactive
+USBPcapCap.exe --list-interfaces --json
+USBPcapCap.exe --list-devices --device \\.\USBPcap1 --json
+USBPcapCap.exe --device \\.\USBPcap1 --vendor-id 0x1234 --output out.pcap --duration 5 --json --no-interactive
+USBPcapCap.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --app-filter --store-mode on-match --output out.pcap --duration 3600 --json --no-interactive
 ```
 
 ### 阶段 2：Go Service
@@ -643,7 +643,7 @@ USBPcapCMD.exe --device \\.\USBPcap1 --vendor-id 0x1234 --endpoint 0x81 --app-fi
 1. 新建 `USBPcapAI` Go module。
 2. 实现 Windows Service install/start/stop/status。
 3. 实现 Named Pipe IPC。
-4. 实现调用 `USBPcapCMD.exe`。
+4. 实现调用 `USBPcapCap.exe`。
 5. 实现抓包输出目录管理。
 6. 实现任务超时和停止。
 7. 实现 pcap 摘要解析。
@@ -685,7 +685,7 @@ USBPcapService.exe status
 
 1. 生成三个 exe。
 2. 提供默认 `config.json`。
-3. 检查服务从自身目录定位 `USBPcapCMD.exe`。
+3. 检查服务从自身目录定位 `USBPcapCap.exe`。
 4. 检查不同目录运行。
 5. 检查没有驱动时的错误提示。
 6. 检查服务未安装时 MCP 的错误提示。
@@ -707,9 +707,9 @@ USBPcapService.exe status
 
 ## 11. 验收标准
 
-1. `USBPcapCMD.exe --list-interfaces --json` 输出合法 UTF-8 JSON。
-2. `USBPcapCMD.exe --list-devices --device ... --json` 能输出 VID/PID/address。
-3. `USBPcapCMD.exe --vendor-id ... --duration ...` 可抓取已连接目标设备。
+1. `USBPcapCap.exe --list-interfaces --json` 输出合法 UTF-8 JSON。
+2. `USBPcapCap.exe --list-devices --device ... --json` 能输出 VID/PID/address。
+3. `USBPcapCap.exe --vendor-id ... --duration ...` 可抓取已连接目标设备。
 4. PowerShell、cmd、重定向、Go 子进程读取均无乱码。
 5. Service 安装后，普通用户运行 MCP 抓包不弹 UAC。
 6. MCP 返回 pcap 路径、文件大小、包数量、transfer type 摘要。

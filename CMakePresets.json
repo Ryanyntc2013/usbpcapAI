@@ -27,14 +27,14 @@
       "displayName": "Build Debug",
       "configurePreset": "vs2022-x64-debug",
       "configuration": "Debug",
-      "targets": ["USBPcapCMD"]
+      "targets": ["USBPcapCap"]
     },
     {
       "name": "build-release",
       "displayName": "Build Release",
       "configurePreset": "vs2022-x64-release",
       "configuration": "Release",
-      "targets": ["USBPcapCMD"]
+      "targets": ["USBPcapCap"]
     }
   ]
 }

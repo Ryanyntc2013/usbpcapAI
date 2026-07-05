@@ -13,7 +13,7 @@ import (
 func TestSaveAndLoadConfig(t *testing.T) {
 	dir := t.TempDir()
 	exePath := filepath.Join(dir, "usbpcap-service.exe")
-	cmdPath := filepath.Join(dir, "USBPcapCMD.exe")
+	cmdPath := filepath.Join(dir, "USBPcapCap.exe")
 	if err := os.WriteFile(cmdPath, []byte("stub"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestSaveAndLoadConfig(t *testing.T) {
 
 func TestValidateCreatesCaptureDir(t *testing.T) {
 	dir := t.TempDir()
-	cmdPath := filepath.Join(dir, "USBPcapCMD.exe")
+	cmdPath := filepath.Join(dir, "USBPcapCap.exe")
 	if err := os.WriteFile(cmdPath, []byte("stub"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestValidateCreatesCaptureDir(t *testing.T) {
 func TestValidateRejectsRelativeOrMissingCMDPath(t *testing.T) {
 	cfg := DefaultConfig(filepath.Join(t.TempDir(), "usbpcap-service.exe"))
 	cfg.CaptureDir = t.TempDir()
-	cfg.CMDPath = `USBPcapCMD.exe`
+	cfg.CMDPath = `USBPcapCap.exe`
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected relative cmd path validation error")
 	}

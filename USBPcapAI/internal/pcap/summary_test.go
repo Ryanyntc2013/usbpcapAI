@@ -35,9 +35,9 @@ func TestSummarizeUSBPcapFile(t *testing.T) {
 		t.Helper()
 		payload := make([]byte, 27)
 		binary.LittleEndian.PutUint16(payload[0:2], 27)
-		binary.LittleEndian.PutUint16(payload[17:19], device)
-		payload[19] = endpoint
-		payload[20] = transfer
+		binary.LittleEndian.PutUint16(payload[19:21], device)
+		payload[21] = endpoint
+		payload[22] = transfer
 		rh := recordHeader{TSSec: tsSec, TSUsec: tsUsec, InclLen: uint32(len(payload)), OrigLen: uint32(len(payload))}
 		if err := binary.Write(f, binary.LittleEndian, &rh); err != nil {
 			t.Fatal(err)

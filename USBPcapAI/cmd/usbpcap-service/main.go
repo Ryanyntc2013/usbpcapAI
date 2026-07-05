@@ -17,6 +17,9 @@ import (
 	"usbpcap-ai/internal/service"
 )
 
+// version is set by ldflags at build time: -X main.version=X.Y.Z
+var version = "dev"
+
 const serviceName = "USBPcapAIService"
 
 type serviceProgram struct {
@@ -68,10 +71,20 @@ func main() {
 			return
 		case "install":
 			cfg = applyConfigArgs(cfg, os.Args[2:])
+			// Auto-generate config defaults if not specified
+			if cfg.CaptureDir == "" {
+				cfg.CaptureDir = filepath.Join(filepath.Dir(exePath), "captures")
+			}
+			if cfg.CMDPath == "" {
+				cfg.CMDPath = filepath.Join(filepath.Dir(exePath), "USBPcapCap.exe")
+			}
+			os.MkdirAll(cfg.CaptureDir, 0755)
 			must(validateInstallLocation(exePath, cfg))
 			must(cfg.Validate())
 			must(service.SaveConfig(exePath, cfg))
+			fmt.Printf("  Generated config.json (captureDir=%s)\n", cfg.CaptureDir)
 			must(installService(exePath))
+			fmt.Println("Service installed successfully. Use 'start' to start.")
 			return
 		case "configure":
 			cfg = applyConfigArgs(cfg, os.Args[2:])
@@ -89,18 +102,41 @@ func main() {
 		case "stop":
 			must(controlService("stop"))
 			return
+		case "restart":
+			must(controlService("stop"))
+			must(controlService("start"))
+			fmt.Println("Service restarted.")
+			return
 		case "status":
 			must(printStatus(cfg))
 			return
+		case "driver-install":
+			must(driverInstall(exePath))
+			return
+		case "driver-uninstall":
+			must(driverUninstall(exePath))
+			return
+		case "version", "--version", "-v":
+			fmt.Printf("USBPcapService version %s\n", version)
+			return
+		case "help", "-h", "--help":
+			printHelp()
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
+			printHelp()
+			os.Exit(1)
 		}
 	}
 
+	// No args: if running as Windows service, enter SCM loop; otherwise show help
 	isService, err := svc.IsWindowsService()
 	if err == nil && isService {
 		must(svc.Run(serviceName, &serviceProgram{cfg: cfg}))
 		return
 	}
-	must(service.NewServer(cfg).ListenAndServe())
+	// Not a Windows service and no args — print help
+	printHelp()
 }
 
 func installService(exePath string) error {
@@ -153,6 +189,27 @@ func controlService(action string) error {
 	return err
 }
 
+func serviceStateName(state svc.State) string {
+	switch state {
+	case svc.Stopped:
+		return "stopped"
+	case svc.StartPending:
+		return "start-pending"
+	case svc.StopPending:
+		return "stop-pending"
+	case svc.Running:
+		return "running"
+	case svc.ContinuePending:
+		return "continue-pending"
+	case svc.PausePending:
+		return "pause-pending"
+	case svc.Paused:
+		return "paused"
+	default:
+		return fmt.Sprintf("unknown(%d)", state)
+	}
+}
+
 func printStatus(cfg service.Config) error {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -168,7 +225,7 @@ func printStatus(cfg service.Config) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s: %d\n", serviceName, st.State)
+	fmt.Printf("%s: %s\n", serviceName, serviceStateName(st.State))
 	fmt.Printf("cmd: %s\n", cfg.CMDPath)
 	fmt.Printf("captures: %s\n", cfg.CaptureDir)
 	fmt.Printf("config: %s\n", service.ConfigPath(mustExecutable()))
@@ -226,6 +283,40 @@ func applyConfigArgs(cfg service.Config, args []string) service.Config {
 		cfg.CMDPath = filepath.Join(filepath.Dir(mustExecutable()), cfg.CMDPath)
 	}
 	return cfg
+}
+
+func printHelp() {
+	fmt.Print(`
+USBPcapService — USBPcap AI capture service
+
+Usage:
+  USBPcapService.exe [command]
+
+Commands:
+  run                 Run in foreground (used by MCP auto-launch)
+  install             Install as Windows service (admin) — auto-generates config
+  uninstall           Uninstall Windows service (admin)
+  start               Start Windows service (admin)
+  stop                Stop Windows service (admin)
+  restart             Restart Windows service (admin)
+  status              Show service status
+  configure           Save config.json
+  driver-install      Install USBPcap driver (admin)
+  driver-uninstall    Uninstall USBPcap driver (admin)
+  version             Show version
+  help                Show this help
+
+Auto-launch mode:
+  USBPcapMCP.exe automatically starts USBPcapService.exe run when needed
+  and stops it when the MCP exits — no admin required.
+
+Examples:
+  USBPcapService.exe run                    # foreground mode
+  USBPcapService.exe install                # install + auto-config
+  USBPcapService.exe install --capture-dir "D:\caps"
+  USBPcapService.exe driver-install
+  USBPcapService.exe status
+`)
 }
 
 func validateInstallLocation(exePath string, cfg service.Config) error {
