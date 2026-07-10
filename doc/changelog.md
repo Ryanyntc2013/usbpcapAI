@@ -1,5 +1,59 @@
 # USBPcapMCP 修复记录
 
+## 2026-07-10 — v0.4.0
+
+### 正确性与安全修复
+
+**P0-1: VID/PID 过滤参数修复**
+- 提取 `BuildCaptureArgs()` 纯函数，有 VID/PID 时不加 `-A`
+- 防止 `-A` 覆盖地址列表导致精确过滤失效
+
+**P0-2: 结构化错误链路**
+- Runner 在非零退出时先解析 stdout JSON，成功则返回 `CmdError`
+- `NO_MATCHED_DEVICE` 等状态可稳定传递到 Service 层
+
+**P0-3~5: 统一 PCAP Reader + 分析修复**
+- 新增 `pcap.Reader` / `OpenReader()`：单记录 64MiB 上限、越界 payload 安全截断
+- `Analyze()`: `PacketCount` 修正为真实包数，endpoint key 加入 device 防合并，结果稳定排序
+- `ExportPayload()`: 使用安全 Reader，10000 包 / 64MiB 总上限
+- `Summarize()`: 复用 `SummarizeReader()`
+
+**P0-6: safePcapPath 加固**
+- `filepath.Rel` 防前缀绕过，`Lstat` 拒绝 symlink/junction
+- `handleAnalyze` 统一复用 `safePcapPath()`
+
+**P0-7: Service 可取消生命周期**
+- 新增 `ListenAndServeContext(ctx)`，取消时关闭 listener
+- SCM Stop 主动取消 + 10s 等待优雅停止
+- `shutdown()` 停止活动抓包后返回
+
+**P0-8: MCP 协议合规**
+- `initialize` 读取客户端版本并协商
+- Notification 不产生响应
+- ToolResult 移除非标准 `content.type:"json"`
+
+**P0-9: Pipe ACL 收紧**
+- SDDL 从全部 `IU` 改为当前进程用户 SID
+
+### 稳定性修复
+
+**P1: 任务并发安全**
+- `captureTaskState.taskMu` + `updateTaskSnapshot()`/`taskSnapshot()` 消除 data race
+- `go test -race ./...` 全通过
+
+**P1: 状态统一**
+- `no-match` → `no_match` 全部统一
+
+**P1: 输出文件**
+- `defaultOutputPath()` 强制追加 `.pcap` 后缀
+
+### 文档同步
+- README: 工具数 10→19，补全工具表，双模式权限说明
+- improvement-roadmap: 标记已实现项目
+- mcp-install-guide: 修正双模式权限描述，删除重复故障条目
+
+---
+
 ## 2026-07-05 — v0.3.0
 
 ### Breaking: USBPcapCMD.exe 重命名为 USBPcapCap.exe

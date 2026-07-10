@@ -208,8 +208,8 @@ func TestNormalizeHexAndInterface(t *testing.T) {
 
 func TestNormalizeRequest(t *testing.T) {
 	req := &ipc.Request{
-		VendorID:   "1a86",
-		ProductID:  "FFCC",
+		VendorID:  "1a86",
+		ProductID: "FFCC",
 		Endpoint:  "81",
 		Interface: "USBPcap2",
 	}
@@ -263,9 +263,9 @@ func TestDefaultOutputPath(t *testing.T) {
 		t.Fatalf("expected timestamp-based name, got %q", path)
 	}
 
-	// Non-pcap extension is preserved
+	// Non-pcap extension is forced to .pcap
 	path = srv.defaultOutputPath("data.bin")
-	expected = filepath.Join(cfg.CaptureDir, "data.bin")
+	expected = filepath.Join(cfg.CaptureDir, "data.bin.pcap")
 	if path != expected {
 		t.Fatalf("defaultOutputPath(%q)=%q, want %q", "data.bin", path, expected)
 	}
@@ -290,10 +290,10 @@ func TestHandleAnalyzeWithPCAP(t *testing.T) {
 	// Write file header (USBPcap magic + network=249)
 	fh := make([]byte, 24)
 	writeLE32(fh[0:4], 0xA1B2C3D4) // magic
-	writeLE16(fh[4:6], 2)           // major
-	writeLE16(fh[6:8], 4)           // minor
-	writeLE32(fh[16:20], 65535)     // snaplen
-	writeLE32(fh[20:24], 249)       // network = USBPcap
+	writeLE16(fh[4:6], 2)          // major
+	writeLE16(fh[6:8], 4)          // minor
+	writeLE32(fh[16:20], 65535)    // snaplen
+	writeLE32(fh[20:24], 249)      // network = USBPcap
 	if _, err := file.Write(fh); err != nil {
 		file.Close()
 		t.Fatal(err)

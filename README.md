@@ -30,16 +30,22 @@ usbpcap/
 ### USBPcapAI 新增能力
 | 特性 | 说明 |
 |------|------|
-| 🤖 **MCP 协议支持** | 通过标准 stdio JSON-RPC 为 AI 工具暴露 10 个抓包工具 |
+| 🤖 **MCP 协议支持** | 通过标准 stdio JSON-RPC 为 AI 工具暴露 19 个 MCP 工具 |
 | 🔌 **VID/PID 精确过滤** | 已连接设备可按 Vendor ID / Product ID 精准匹配 |
 | 🎯 **Endpoint 过滤** | 支持按端点地址（如 `0x81`）过滤 |
 | 📦 **传输类型过滤** | 支持 `control` / `bulk` / `interrupt` / `isochronous` |
 | 🔔 **触发式存储** | 命中匹配条件后才开始写盘，适合长时间监测 |
-| ⏱️ **长期监测保护** | 空闲超时 (`idleTimeout`)、文件大小上限 (`maxFileSize`)、自动清理旧抓包文件 |
-| 🪟 **无 UAC 弹窗** | 以后台 Windows Service 运行抓包，AI 调用流畅无阻断 |
+| ⏱️ **长期监测保护** | 空闲超时、文件大小上限、自动清理旧文件 |
+| 🪟 **双模式部署** | Windows Service 模式真正免 UAC；MCP 前台模式免安装便携使用 |
 | 📊 **抓包摘要** | 自动返回 pcap 文件路径、端点统计和流量概要 |
-| 🗂️ **异步任务与历史** | 支持异步启动抓包并返回 `taskId`，可查询当前和最近的抓包历史 |
+| 🗂️ **异步任务与历史** | 支持异步启动抓包并返回 `taskId`，可查询历史 |
 | 🪝 **新设备自动捕获** | 可选择捕获抓包期间新插入的任意 USB 设备 |
+| 🔍 **智能探测** | `probe_device` 自动跨接口扫描设备，无需手动指定 interface |
+| 🧠 **一键抓包** | `smart_capture` 探测→抓包→等待→摘要→建议下一步，一步完成 |
+| 📈 **流量分析** | `analyze` 按端点/传输类型/payload 模式分析 pcap |
+| 🩺 **故障诊断** | `diagnose_capture` 结构化诊断空包/空闲/过滤过严等原因 |
+| 📤 **数据导出** | `export_data` 从 pcap 提取 payload（Hex/CSV/Raw） |
+| ⏳ **显式等待** | `wait_capture_task` 阻塞等待异步任务完成，适合 AI agent 调用 |
 
 ### MCP 工具列表
 
@@ -47,14 +53,23 @@ usbpcap/
 |--------|------|
 | `usbpcap_list_interfaces` | 列出可用的 USBPcap 捕获接口 |
 | `usbpcap_list_devices` | 列出指定接口下已连接的 USB 设备 |
+| `usbpcap_probe_device` | 自动扫描所有接口，按 VID/PID 定位设备 |
+| `usbpcap_smart_capture` | 一键完成探测→抓包→等待→摘要 |
 | `usbpcap_capture_once` | 执行一次同步抓包并返回 pcap 路径与摘要 |
 | `usbpcap_start_capture` | 异步启动抓包并返回 `taskId` |
+| `usbpcap_wait_capture_task` | 阻塞等待异步任务完成，返回完整结果 |
 | `usbpcap_get_capture_task` | 按 `taskId` 查询抓包任务状态与结果 |
 | `usbpcap_list_capture_tasks` | 列出当前和最近的抓包任务 |
 | `usbpcap_capture_status` | 查询抓包服务运行状态 |
-| `usbpcap_stop_capture` | 停止当前正在进行的抓包 |
-| `usbpcap_get_config` | 查看服务当前配置（含保护参数） |
+| `usbpcap_stop_capture` | 停止当前正在进行的抓包（支持按 taskId） |
+| `usbpcap_analyze` | 分析 pcap 的端点详情、payload 模式和帧统计 |
+| `usbpcap_profile_device` | 短采样识别活跃端点并生成推荐配置 |
+| `usbpcap_diagnose_capture` | 结构化诊断空包/空闲/过滤过严等原因 |
+| `usbpcap_export_data` | 从 pcap 提取 payload（Hex/CSV/Raw） |
+| `usbpcap_get_config` | 查看服务当前配置 |
 | `usbpcap_help` | 查看帮助、过滤语义与使用示例 |
+| `usbpcap_install_guide` | 获取安装指南 |
+| `usbpcap_service_control` | 管理 Windows 服务状态 |
 
 ## 快速开始
 
@@ -149,16 +164,22 @@ usbpcap/
 ### USBPcapAI Enhancements
 | Feature | Description |
 |---------|-------------|
-| 🤖 **MCP Protocol** | Exposes 10 capture tools to AI agents via stdio JSON-RPC |
+| 🤖 **MCP Protocol** | Exposes 19 MCP tools to AI agents via stdio JSON-RPC |
 | 🔌 **VID/PID Filtering** | Precise filtering by Vendor ID / Product ID for connected devices |
 | 🎯 **Endpoint Filtering** | Filter by endpoint address (e.g. `0x81`) |
 | 📦 **Transfer Type Filtering** | Support for `control` / `bulk` / `interrupt` / `isochronous` |
-| 🔔 **Triggered Capture** | Start writing to disk only on condition match — ideal for long-duration monitoring |
-| ⏱️ **Capture Limits** | Idle timeout (`idleTimeout`), file size cap (`maxFileSize`), and automatic old-file cleanup |
-| 🪟 **Zero UAC Prompts** | Capture runs as a background Windows Service; frictionless AI invocation |
+| 🔔 **Triggered Capture** | Start writing to disk only on condition match |
+| ⏱️ **Capture Limits** | Idle timeout, file size cap, automatic old-file cleanup |
+| 🪟 **Dual-Mode** | Windows Service for true zero-UAC; MCP foreground mode for portable use |
 | 📊 **Capture Summary** | Auto-returns pcap file path, endpoint stats, and traffic overview |
-| 🗂️ **Async Tasks & History** | `startCapture` returns `taskId` immediately; query current and recent capture history |
+| 🗂️ **Async Tasks & History** | `startCapture` returns `taskId`; query current and recent history |
 | 🪝 **New Device Capture** | Optionally capture any USB device plugged in during the session |
+| 🔍 **Smart Probing** | `probe_device` scans all interfaces automatically by VID/PID |
+| 🧠 **One-Click Capture** | `smart_capture`: probe→capture→wait→summary in one step |
+| 📈 **Traffic Analysis** | `analyze` breaks down endpoints, transfer types, and payload patterns |
+| 🩺 **Diagnosis** | `diagnose_capture` provides structured diagnosis for empty/failed captures |
+| 📤 **Data Export** | `export_data` extracts payload as Hex/CSV/Raw from pcap |
+| ⏳ **Explicit Wait** | `wait_capture_task` blocks until async capture completes |
 
 ### MCP Tools
 
@@ -166,14 +187,23 @@ usbpcap/
 |------|-------------|
 | `usbpcap_list_interfaces` | List available USBPcap capture interfaces |
 | `usbpcap_list_devices` | List connected USB devices on a given interface |
-| `usbpcap_capture_once` | Perform a single synchronous capture and return pcap path + summary |
-| `usbpcap_start_capture` | Start an async capture and return `taskId` immediately |
+| `usbpcap_probe_device` | Auto-scan all interfaces by VID/PID to locate a device |
+| `usbpcap_smart_capture` | One-click probe→capture→wait→summary→next step |
+| `usbpcap_capture_once` | Perform a single synchronous capture, return pcap path + summary |
+| `usbpcap_start_capture` | Start an async capture and return `taskId` |
+| `usbpcap_wait_capture_task` | Block until async capture completes, return full results |
 | `usbpcap_get_capture_task` | Query capture task status and results by `taskId` |
 | `usbpcap_list_capture_tasks` | List current and recent capture tasks |
 | `usbpcap_capture_status` | Query capture service status |
-| `usbpcap_stop_capture` | Stop the currently running capture |
-| `usbpcap_get_config` | View current service configuration (including protection parameters) |
+| `usbpcap_stop_capture` | Stop the currently running capture (by taskId) |
+| `usbpcap_analyze` | Analyze pcap: endpoint details, payload patterns, frame stats |
+| `usbpcap_profile_device` | Short sample to discover active endpoints, recommend config |
+| `usbpcap_diagnose_capture` | Structured diagnosis for empty/idle/filtered captures |
+| `usbpcap_export_data` | Extract payload from pcap in Hex/CSV/Raw |
+| `usbpcap_get_config` | View current service configuration |
 | `usbpcap_help` | Show help, filter semantics, and usage examples |
+| `usbpcap_install_guide` | Get installation guide |
+| `usbpcap_service_control` | Manage Windows service status |
 
 ## Quick Start
 

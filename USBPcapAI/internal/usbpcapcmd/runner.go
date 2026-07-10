@@ -85,7 +85,9 @@ func (r Runner) Capture(req ipc.Request, outputPath string) (*CaptureResult, err
 	return r.CaptureContext(context.Background(), req, outputPath)
 }
 
-func (r Runner) CaptureContext(ctx context.Context, req ipc.Request, outputPath string) (*CaptureResult, error) {
+// buildCaptureArgs constructs the CLI arguments for USBPcapCap.
+// It is exported for testing.
+func BuildCaptureArgs(req ipc.Request, outputPath string) []string {
 	args := []string{"--json", "--no-interactive", "--output", outputPath}
 	if req.Interface != "" {
 		args = append(args, "--device", req.Interface)
@@ -105,12 +107,12 @@ func (r Runner) CaptureContext(ctx context.Context, req ipc.Request, outputPath 
 	if req.CaptureNewDevices {
 		args = append(args, "--capture-from-new-devices")
 	}
-	// Always add -A to capture from all devices on the interface.
-	// VID/PID filtering is handled separately via --vendor-id/--product-id
-	// as application-layer (user-mode) filters after capture.
-	// Without -A, USBPcapCMD produces empty captures for devices with
-	// only intermittent or idle traffic.
-	if !req.CaptureNewDevices {
+	// -A enables driver-level capture of all devices on the interface.
+	// Only add -A when no VID/PID filter is active — VID/PID filtering
+	// resolves to an address list for precise driver-level address filtering.
+	// Adding -A with VID/PID would override the resolved address list
+	// and capture unrelated devices, violating the design requirement.
+	if !req.CaptureNewDevices && req.VendorID == "" && req.ProductID == "" {
 		args = append(args, "-A")
 	}
 	if req.AppFilter {
@@ -125,6 +127,11 @@ func (r Runner) CaptureContext(ctx context.Context, req ipc.Request, outputPath 
 	if req.StoreMode != "" {
 		args = append(args, "--store-mode", req.StoreMode)
 	}
+	return args
+}
+
+func (r Runner) CaptureContext(ctx context.Context, req ipc.Request, outputPath string) (*CaptureResult, error) {
+	args := BuildCaptureArgs(req, outputPath)
 	out, err := r.runContext(ctx, args...)
 	if err != nil {
 		return nil, err
@@ -196,6 +203,18 @@ func (r Runner) runContext(ctx context.Context, args ...string) ([]byte, error) 
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		// Try to parse stdout as structured JSON error first.
+		// C outputs JSON errors to stdout even on non-zero exit.
+		if stdout.Len() > 0 {
+			var cr CaptureResult
+			if jsonErr := json.Unmarshal(stdout.Bytes(), &cr); jsonErr == nil && !cr.OK {
+				return nil, &CmdError{
+					ErrorCode: cr.ErrorCode,
+					Message:   cr.Message,
+					Hint:      cr.Hint,
+				}
+			}
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {

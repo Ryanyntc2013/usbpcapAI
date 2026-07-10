@@ -271,6 +271,11 @@ func main() {
 			writer.Flush()
 			continue
 		}
+		// Notifications have no ID — silently accept, do not respond.
+		if req.ID == nil {
+			handleNotification(req)
+			continue
+		}
 		resp := handle(req)
 		_ = json.NewEncoder(writer).Encode(resp)
 		writer.Flush()
@@ -281,11 +286,31 @@ func main() {
 	}
 }
 
+func handleNotification(req rpcRequest) {
+	// Accept notifications/initialized and ping
+	switch req.Method {
+	case "notifications/initialized":
+		// Client is ready — silently accepted per MCP spec.
+	default:
+		// Other notifications are silently ignored.
+	}
+}
+
 func handle(req rpcRequest) rpcResponse {
 	switch req.Method {
 	case "initialize":
+		var params struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		_ = json.Unmarshal(req.Params, &params)
+		// Negotiate: if client requests a version we support, echo it.
+		// Otherwise respond with our supported version.
+		protoVersion := params.ProtocolVersion
+		if protoVersion != "2024-11-05" && protoVersion != "2025-03-26" {
+			protoVersion = "2024-11-05"
+		}
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": protoVersion,
 			"serverInfo":      map[string]string{"name": "usbpcap-mcp", "version": version},
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
@@ -322,7 +347,6 @@ func wrapToolResult(result any) toolCallResult {
 	return toolCallResult{
 		Content: []map[string]any{
 			{"type": "text", "text": string(pretty)},
-			{"type": "json", "json": result},
 		},
 	}
 }
@@ -336,7 +360,6 @@ func wrapToolErrorResult(result any) toolCallResult {
 		IsError: true,
 		Content: []map[string]any{
 			{"type": "text", "text": string(pretty)},
-			{"type": "json", "json": result},
 		},
 	}
 }

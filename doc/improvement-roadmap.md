@@ -2,6 +2,10 @@
 
 > 编写日期：2026-07-05  
 > 当前版本：v0.1.0（已修复 2 个关键 bug）
+>
+> **⚠ 2026-07-10 更新**: 本文档中多数 P1 功能已在 v0.3.0 实现，P0 修复已纳入 v0.4.0 计划。
+> 实际 MCP 工具已从 10 个扩展到 19 个。以下标记 `✅ 已实现` 的项目为当前版本已交付，
+> 标记 `🔄 v0.4.0` 的为下一阶段改进中。
 
 ---
 
@@ -12,20 +16,29 @@ VS Code ← stdio/jsonrpc → USBPcapMCP.exe ← named pipe → USBPcapService.e
            (Go, MCP 协议)         (ipc.Call, 30s超时)    (Windows 服务)       (C, 驱动层抓包)
 ```
 
-**MCP Server 当前提供的 10 个工具：**
+**MCP Server 当前提供的 19 个工具：**
 
 | 工具 | 类型 | 状态 |
 |------|------|------|
 | `usbpcap_list_interfaces` | 发现 | ✅ |
 | `usbpcap_list_devices` | 发现 | ✅ |
-| `usbpcap_capture_once` | 同步抓包 | ✅ 有问题见 P0-2 |
+| `usbpcap_probe_device` | 发现 | ✅ 已实现 |
+| `usbpcap_smart_capture` | 抓包 | ✅ 已实现 |
+| `usbpcap_capture_once` | 同步抓包 | ✅ |
 | `usbpcap_start_capture` | 异步抓包 | ✅ |
+| `usbpcap_wait_capture_task` | 等待 | ✅ 已实现 |
 | `usbpcap_get_capture_task` | 查询 | ✅ |
 | `usbpcap_list_capture_tasks` | 查询 | ✅ |
 | `usbpcap_stop_capture` | 控制 | ✅ |
 | `usbpcap_capture_status` | 状态 | ✅ |
+| `usbpcap_analyze` | 分析 | ✅ 已实现 |
+| `usbpcap_profile_device` | 分析 | ✅ 已实现 |
+| `usbpcap_diagnose_capture` | 诊断 | ✅ 已实现 |
+| `usbpcap_export_data` | 导出 | ✅ 已实现 |
 | `usbpcap_get_config` | 配置 | ✅ |
 | `usbpcap_help` | 帮助 | ✅ |
+| `usbpcap_install_guide` | 帮助 | ✅ 已实现 |
+| `usbpcap_service_control` | 管理 | ✅ 已实现 |
 
 ---
 

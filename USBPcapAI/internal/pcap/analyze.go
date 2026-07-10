@@ -5,106 +5,91 @@
 package pcap
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"sort"
 
 	"usbpcap-ai/internal/ipc"
 )
 
 func Analyze(path string, deviceAddr *uint16) (*ipc.AnalyzeResult, error) {
-	f, err := os.Open(path)
+	r, err := OpenReader(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer r.Close()
 
-	var fh fileHeader
-	if err := binary.Read(f, binary.LittleEndian, &fh); err != nil {
-		return nil, err
+	type epKey struct {
+		endpoint string
+		device   uint16
 	}
-	if fh.MagicNumber != 0xA1B2C3D4 && fh.MagicNumber != 0xD4C3B2A1 {
-		return nil, errors.New("unsupported pcap magic")
-	}
-	if fh.Network != 249 {
-		return nil, errors.New("unsupported link type: not USBPcap")
-	}
-
-	endpointMap := make(map[string]*endpointAccum)
+	endpointMap := make(map[epKey]*endpointAccum)
 	var firstTS, lastTS uint64
 	var firstSet bool
+	var totalPackets uint64
 	totalPayloadBytes := uint64(0)
-	dataLenBuckets := make(map[string]uint64)
+	dataLenCounted := make(map[uint32]uint64)
 	firstBytePattern := make(map[string]uint64)
 
-	dataLenCounted := make(map[uint32]uint64)
-
 	for {
-		var rh recordHeader
-		if err := binary.Read(f, binary.LittleEndian, &rh); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
+		rec, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
 			return nil, err
 		}
-		buf := make([]byte, rh.InclLen)
-		if _, err := io.ReadFull(f, buf); err != nil {
-			return nil, err
-		}
-
-		tsMillis := uint64(rh.TSSec)*1000 + uint64(rh.TSUsec)/1000
+		totalPackets++
+		tsMillis := uint64(rec.TSSec)*1000 + uint64(rec.TSUsec)/1000
 		if !firstSet {
 			firstTS = tsMillis
 			firstSet = true
 		}
 		lastTS = tsMillis
 
-		if len(buf) < 27 {
+		if rec.HeaderLen == 0 {
 			continue
 		}
 
-		device := binary.LittleEndian.Uint16(buf[19:21])
-		if deviceAddr != nil && device != *deviceAddr {
+		if deviceAddr != nil && rec.Device != *deviceAddr {
 			continue
 		}
 
-		endpoint := buf[21]
-		transfer := buf[22]
-		dataLen := binary.LittleEndian.Uint32(buf[23:27])
-
-		epKey := fmt.Sprintf("0x%02x", endpoint)
-		acc, ok := endpointMap[epKey]
+		key := epKey{
+			endpoint: fmt.Sprintf("0x%02x", rec.Endpoint),
+			device:   rec.Device,
+		}
+		acc, ok := endpointMap[key]
 		if !ok {
 			dir := "OUT"
-			if endpoint&0x80 != 0 {
+			if rec.Endpoint&0x80 != 0 {
 				dir = "IN"
 			}
-			t := transferTypeName(transfer)
+			t := transferTypeName(rec.Transfer)
 			acc = &endpointAccum{
-				endpoint:  epKey,
+				endpoint:  key.endpoint,
+				device:    key.device,
 				direction: dir,
 				transType: t,
 			}
-			endpointMap[epKey] = acc
+			endpointMap[key] = acc
 		}
 		acc.packets++
-		acc.totalBytes += uint64(dataLen)
-		if acc.minDataLen == 0 || dataLen < acc.minDataLen {
-			acc.minDataLen = dataLen
+		acc.totalBytes += uint64(rec.ActualLen)
+		if acc.minDataLen == 0 || rec.ActualLen < acc.minDataLen {
+			acc.minDataLen = rec.ActualLen
 		}
-		if dataLen > acc.maxDataLen {
-			acc.maxDataLen = dataLen
+		if rec.ActualLen > acc.maxDataLen {
+			acc.maxDataLen = rec.ActualLen
 		}
 
-		totalPayloadBytes += uint64(dataLen)
-		dataLenCounted[dataLen]++
+		totalPayloadBytes += uint64(rec.ActualLen)
+		dataLenCounted[rec.ActualLen]++
 
-		// First byte of payload (after the 27-byte USBPcap header)
-		payloadStart := int(binary.LittleEndian.Uint16(buf[0:2]))
-		if payloadStart >= 27 && payloadStart+1 < len(buf) {
-			firstByte := buf[payloadStart]
+		// First byte of payload
+		if len(rec.Payload) > 0 {
+			firstByte := rec.Payload[0]
 			fbKey := fmt.Sprintf("0x%02x", firstByte)
 			firstBytePattern[fbKey]++
 		}
@@ -113,7 +98,7 @@ func Analyze(path string, deviceAddr *uint16) (*ipc.AnalyzeResult, error) {
 	if len(endpointMap) == 0 {
 		return &ipc.AnalyzeResult{
 			PCAPPath:    path,
-			PacketCount: 0,
+			PacketCount: totalPackets,
 			Endpoints:   []ipc.EndpointStat{},
 		}, nil
 	}
@@ -135,13 +120,20 @@ func Analyze(path string, deviceAddr *uint16) (*ipc.AnalyzeResult, error) {
 			AvgDataLen:   avg,
 		})
 	}
+	// Sort by endpoint for stable output
+	sort.Slice(endpoints, func(i, j int) bool {
+		if endpoints[i].Endpoint != endpoints[j].Endpoint {
+			return endpoints[i].Endpoint < endpoints[j].Endpoint
+		}
+		return endpoints[i].Direction < endpoints[j].Direction
+	})
 
-	// Build dataLen buckets (grouped by ranges)
+	// Build dataLen buckets
+	dataLenBuckets := make(map[string]uint64)
 	for length, count := range dataLenCounted {
 		bucket := dataLenBucket(length)
 		dataLenBuckets[bucket] += count
 	}
-	// Build dataLenStats
 	dataLenStats := make(map[string]uint64)
 	for k, v := range dataLenCounted {
 		dataLenStats[fmt.Sprintf("%d", k)] = v
@@ -154,8 +146,8 @@ func Analyze(path string, deviceAddr *uint16) (*ipc.AnalyzeResult, error) {
 
 	return &ipc.AnalyzeResult{
 		PCAPPath:    path,
-		PacketCount: uint64(len(endpointMap)),
-		DurationMS: durationMs,
+		PacketCount: totalPackets,
+		DurationMS:  durationMs,
 		Endpoints:   endpoints,
 		PayloadStats: &ipc.PayloadStats{
 			TotalPayloadBytes: totalPayloadBytes,
@@ -168,77 +160,56 @@ func Analyze(path string, deviceAddr *uint16) (*ipc.AnalyzeResult, error) {
 }
 
 // ExportPayload extracts payload data from pcap for a specific device+endpoint.
-// Returns a slice of hex-encoded payload strings per packet.
+// Uses the safe Reader with size limits to prevent OOM on malformed files.
+// Returns hex-encoded payload strings. Limited to 10000 payloads and 64 MiB total.
 func ExportPayload(path string, deviceAddress uint16, endpoint string, minDataLen uint32) ([]string, error) {
-	f, err := os.Open(path)
+	const maxPayloads = 10000
+	const maxTotalBytes = 64 * 1024 * 1024
+
+	r, err := OpenReader(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-
-	var fh fileHeader
-	if err := binary.Read(f, binary.LittleEndian, &fh); err != nil {
-		return nil, err
-	}
-	if fh.MagicNumber != 0xA1B2C3D4 && fh.MagicNumber != 0xD4C3B2A1 {
-		return nil, errors.New("unsupported pcap magic")
-	}
-	if fh.Network != 249 {
-		return nil, errors.New("unsupported link type: not USBPcap")
-	}
+	defer r.Close()
 
 	epBytes := parseEndpoint(endpoint)
 	var results []string
+	var totalBytes int
 
 	for {
-		var rh recordHeader
-		if err := binary.Read(f, binary.LittleEndian, &rh); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
+		rec, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
 			return nil, err
 		}
-		buf := make([]byte, rh.InclLen)
-		if _, err := io.ReadFull(f, buf); err != nil {
-			return nil, err
-		}
-		if len(buf) < 27 {
+		if rec.HeaderLen == 0 || rec.Device != deviceAddress {
 			continue
 		}
-		device := binary.LittleEndian.Uint16(buf[19:21])
-		epThis := buf[21]
-		if device != deviceAddress {
+		if epBytes != nil && rec.Endpoint != *epBytes {
 			continue
 		}
-		if epBytes != nil && epThis != *epBytes {
+		if rec.ActualLen < minDataLen {
 			continue
 		}
-		dataLen := binary.LittleEndian.Uint32(buf[23:27])
-		if dataLen < minDataLen {
-			continue
-		}
-		payloadStart := int(binary.LittleEndian.Uint16(buf[0:2]))
-		if payloadStart < 27 || payloadStart >= len(buf) {
-			continue
-		}
-		payload := buf[payloadStart : payloadStart+int(dataLen)]
-		if uint32(len(payload)) > dataLen {
-			payload = payload[:dataLen]
-		}
-		if uint32(len(payload)) < minDataLen {
-			continue
-		}
-		hexStr := fmt.Sprintf("%x", payload)
+		hexStr := fmt.Sprintf("%x", rec.Payload)
 		results = append(results, hexStr)
+		totalBytes += len(hexStr)
+
+		if len(results) >= maxPayloads || totalBytes >= maxTotalBytes {
+			break
+		}
 	}
 	return results, nil
 }
 
 type endpointAccum struct {
-	endpoint  string
-	direction string
-	transType string
-	packets   uint64
+	endpoint   string
+	device     uint16
+	direction  string
+	transType  string
+	packets    uint64
 	totalBytes uint64
 	minDataLen uint32
 	maxDataLen uint32

@@ -34,13 +34,10 @@ func TestToolDefinitionsIncludeAll(t *testing.T) {
 
 func TestWrapToolResult(t *testing.T) {
 	result := wrapToolResult(map[string]any{"ok": true, "value": 1})
-	if len(result.Content) != 2 {
-		t.Fatalf("content length=%d, want 2", len(result.Content))
+	if len(result.Content) != 1 {
+		t.Fatalf("content length=%d, want 1", len(result.Content))
 	}
 	if result.Content[0]["type"] != "text" {
 		t.Fatalf("first content type=%v", result.Content[0]["type"])
-	}
-	if result.Content[1]["type"] != "json" {
-		t.Fatalf("second content type=%v", result.Content[1]["type"])
 	}
 }

@@ -15,24 +15,24 @@ import (
 const ConfigFileName = "config.json"
 
 type Config struct {
-	CaptureDir         string `json:"captureDir"`
-	CMDPath            string `json:"cmdPath"`
-	IdleTimeoutSeconds uint32 `json:"idleTimeoutSeconds,omitempty"`
-	MaxFileSizeBytes   int64  `json:"maxFileSizeBytes,omitempty"`
-	MaxHistoryTasks    int    `json:"maxHistoryTasks,omitempty"`
-	MaxCaptureFiles    int    `json:"maxCaptureFiles,omitempty"`
-	HistoryTaskTTLMinutes int `json:"historyTaskTTLMinutes,omitempty"`
+	CaptureDir            string `json:"captureDir"`
+	CMDPath               string `json:"cmdPath"`
+	IdleTimeoutSeconds    uint32 `json:"idleTimeoutSeconds,omitempty"`
+	MaxFileSizeBytes      int64  `json:"maxFileSizeBytes,omitempty"`
+	MaxHistoryTasks       int    `json:"maxHistoryTasks,omitempty"`
+	MaxCaptureFiles       int    `json:"maxCaptureFiles,omitempty"`
+	HistoryTaskTTLMinutes int    `json:"historyTaskTTLMinutes,omitempty"`
 }
 
 func DefaultConfig(exePath string) Config {
 	base := filepath.Dir(exePath)
 	return Config{
-		CaptureDir:         filepath.Join(base, "captures"),
-		CMDPath:            filepath.Join(base, "USBPcapCap.exe"),
-		IdleTimeoutSeconds: 30,
-		MaxFileSizeBytes:   100 * 1024 * 1024,
-		MaxHistoryTasks:    20,
-		MaxCaptureFiles:    50,
+		CaptureDir:            filepath.Join(base, "captures"),
+		CMDPath:               filepath.Join(base, "USBPcapCap.exe"),
+		IdleTimeoutSeconds:    30,
+		MaxFileSizeBytes:      100 * 1024 * 1024,
+		MaxHistoryTasks:       20,
+		MaxCaptureFiles:       50,
 		HistoryTaskTTLMinutes: 60,
 	}
 }

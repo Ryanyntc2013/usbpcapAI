@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Microsoft/go-winio"
+	"golang.org/x/sys/windows"
 
 	"usbpcap-ai/internal/ipc"
 	"usbpcap-ai/internal/pcap"
@@ -28,7 +29,20 @@ import (
 )
 
 const defaultCaptureDurationSeconds uint32 = 10
-const localPipeSecurityDescriptor = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+
+// pipeSecurityDescriptor returns the SDDL for the named pipe.
+// Grants full access to SYSTEM and Administrators, and read+execute to
+// the current process user (replacing the overly broad "IU" group).
+func pipeSecurityDescriptor() string {
+	token := windows.GetCurrentProcessToken()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		// Fallback to SYSTEM + Administrators + Interactive Users
+		return "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+	}
+	sidStr := user.User.Sid.String()
+	return fmt.Sprintf("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGX;;;%s)", sidStr)
+}
 
 type commandRunner interface {
 	ListInterfaces() ([]ipc.InterfaceInfo, error)
@@ -45,6 +59,8 @@ type Server struct {
 	tasks      map[string]*captureTaskState
 	history    []ipc.CaptureTask
 	nextTaskID uint64
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 type activeCapture struct {
@@ -58,6 +74,7 @@ type activeCapture struct {
 }
 
 type captureTaskState struct {
+	taskMu   sync.Mutex
 	task     ipc.CaptureTask
 	req      ipc.Request
 	cancel   context.CancelFunc
@@ -65,6 +82,37 @@ type captureTaskState struct {
 	stopMsg  string
 	stopHint string
 	done     chan struct{}
+}
+
+// setTaskStatus safely updates the task's status fields.
+func (t *captureTaskState) setTaskStatus(status, errorCode, message, hint string) {
+	t.taskMu.Lock()
+	defer t.taskMu.Unlock()
+	t.task.Status = status
+	if errorCode != "" {
+		t.task.ErrorCode = errorCode
+	}
+	if message != "" {
+		t.task.Message = message
+	}
+	if hint != "" {
+		t.task.Hint = hint
+	}
+}
+
+// taskSnapshot returns a copy of the current task state.
+func (t *captureTaskState) taskSnapshot() ipc.CaptureTask {
+	t.taskMu.Lock()
+	defer t.taskMu.Unlock()
+	return t.task
+}
+
+// updateTaskSnapshot applies fn to the task under the lock and returns a copy.
+func (t *captureTaskState) updateTaskSnapshot(fn func(*ipc.CaptureTask)) ipc.CaptureTask {
+	t.taskMu.Lock()
+	defer t.taskMu.Unlock()
+	fn(&t.task)
+	return t.task
 }
 
 func NewServer(cfg Config) *Server {
@@ -77,32 +125,75 @@ func NewServer(cfg Config) *Server {
 }
 
 func (s *Server) ListenAndServe() error {
+	return s.ListenAndServeContext(context.Background())
+}
+
+// ListenAndServeContext runs the server, shutting down gracefully when ctx is cancelled.
+func (s *Server) ListenAndServeContext(ctx context.Context) error {
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	defer s.cancel()
 	if err := s.cfg.Validate(); err != nil {
 		return err
 	}
 	_ = os.Remove(ipc.PipeName)
 	ln, err := winio.ListenPipe(ipc.PipeName, &winio.PipeConfig{
-		InputBufferSize:   64 * 1024,
-		OutputBufferSize:  64 * 1024,
-		SecurityDescriptor: localPipeSecurityDescriptor,
+		InputBufferSize:    64 * 1024,
+		OutputBufferSize:   64 * 1024,
+		SecurityDescriptor: pipeSecurityDescriptor(),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("create named pipe %s: %v\n\nPossible causes:\n  • Another USBPcapService instance (foreground 'run' or Windows service) already holds this pipe.\n  • A previous instance did not clean up properly.\n  • Insufficient permissions (SYSTEM owns the pipe, interactive user cannot open it).\n\nResolution:\n  1. Check which instance is running: USBPcapService.exe status\n  2. Stop the other instance before starting this one.\n  3. Foreground mode and Windows service mode are mutually exclusive.",
+			ipc.PipeName, err)
 	}
-	defer ln.Close()
+
+	// Close listener when context is cancelled
+	go func() {
+		<-s.ctx.Done()
+		ln.Close()
+	}()
 
 	// Start periodic history cleanup
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go s.startHistoryCleanup(ctx)
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	defer cleanupCancel()
+	go s.startHistoryCleanup(cleanupCtx)
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return err
+			select {
+			case <-s.ctx.Done():
+				return s.shutdown()
+			default:
+				return err
+			}
 		}
 		go s.handleConn(conn)
 	}
+}
+
+// shutdown performs graceful cleanup: stops active capture, waits for
+// child processes to finish, and flushes pending state.
+func (s *Server) shutdown() error {
+	s.mu.Lock()
+	if s.active != nil {
+		if task := s.tasks[s.active.taskID]; task != nil {
+			task.stopCode = "SERVICE_STOPPING"
+			task.stopMsg = "service is shutting down"
+		}
+		s.active.cancel()
+		s.active = nil
+	}
+	// Wait for all running tasks to complete (with timeout)
+	for id, task := range s.tasks {
+		select {
+		case <-task.done:
+		default:
+			// don't wait forever
+		}
+		_ = id
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Server) handleConn(conn net.Conn) {
@@ -132,13 +223,13 @@ func errorResponse(errName, errCode, message, hint string) ipc.Response {
 
 func (s *Server) configSnapshot() *ipc.ConfigSnapshot {
 	return &ipc.ConfigSnapshot{
-		CaptureDir:         s.cfg.CaptureDir,
-		CMDPath:            s.cfg.CMDPath,
-		PipeName:           ipc.PipeName,
-		IdleTimeoutSeconds: s.cfg.IdleTimeoutSeconds,
-		MaxFileSizeBytes:   s.cfg.MaxFileSizeBytes,
-		MaxHistoryTasks:    s.cfg.MaxHistoryTasks,
-		MaxCaptureFiles:    s.cfg.MaxCaptureFiles,
+		CaptureDir:            s.cfg.CaptureDir,
+		CMDPath:               s.cfg.CMDPath,
+		PipeName:              ipc.PipeName,
+		IdleTimeoutSeconds:    s.cfg.IdleTimeoutSeconds,
+		MaxFileSizeBytes:      s.cfg.MaxFileSizeBytes,
+		MaxHistoryTasks:       s.cfg.MaxHistoryTasks,
+		MaxCaptureFiles:       s.cfg.MaxCaptureFiles,
 		HistoryTaskTTLMinutes: s.cfg.HistoryTaskTTLMinutes,
 	}
 }
@@ -227,7 +318,7 @@ func (s *Server) newTask(req ipc.Request, outputPath string) *captureTaskState {
 func (s *Server) registerTask(task *captureTaskState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tasks[task.task.TaskID] = task
+	s.tasks[task.taskSnapshot().TaskID] = task
 }
 
 func (s *Server) beginCapture(task *captureTaskState) (context.Context, error) {
@@ -242,17 +333,20 @@ func (s *Server) beginCapture(task *captureTaskState) (context.Context, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	task.cancel = cancel
-	task.task.Status = "running"
-	task.task.StoreMode = storeMode
-	task.task.DurationSeconds = task.req.DurationSeconds
-	task.task.StartedAt = time.Now()
+	now := time.Now()
+	task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+		t.Status = "running"
+		t.StoreMode = storeMode
+		t.DurationSeconds = task.req.DurationSeconds
+		t.StartedAt = now
+	})
 	s.active = &activeCapture{
-		taskID:        task.task.TaskID,
+		taskID:        task.taskSnapshot().TaskID,
 		interfaceName: task.req.Interface,
-		outputPath:    task.task.OutputPath,
+		outputPath:    task.taskSnapshot().OutputPath,
 		storeMode:     storeMode,
 		durationSec:   task.req.DurationSeconds,
-		startedAt:     task.task.StartedAt,
+		startedAt:     now,
 		cancel:        cancel,
 	}
 	return ctx, nil
@@ -268,7 +362,8 @@ func (s *Server) recordHistory(task ipc.CaptureTask) {
 		keep[item.TaskID] = struct{}{}
 	}
 	for id, item := range s.tasks {
-		if item.task.Status == "running" {
+		snapshot := item.taskSnapshot()
+		if snapshot.Status == "running" {
 			continue
 		}
 		if _, ok := keep[id]; !ok {
@@ -325,11 +420,13 @@ func (s *Server) startHistoryCleanup(ctx context.Context) {
 func (s *Server) endCapture(task *captureTaskState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.active != nil && s.active.taskID == task.task.TaskID {
+	if s.active != nil && s.active.taskID == task.taskSnapshot().TaskID {
 		s.active = nil
 	}
-	task.task.FinishedAt = time.Now()
-	s.recordHistory(task.task)
+	task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+		t.FinishedAt = time.Now()
+	})
+	s.recordHistory(task.taskSnapshot())
 }
 
 func (s *Server) stopCapture(code, message, hint string) bool {
@@ -431,27 +528,32 @@ func (s *Server) finalizeTask(task *captureTaskState, path string, captureResp *
 				task.stopCode = "CAPTURE_STOPPED"
 				task.stopMsg = "capture was stopped"
 			}
-			task.task.Status = "stopped"
-			task.task.ErrorCode = task.stopCode
-			task.task.Message = task.stopMsg
+			task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+				t.Status = "stopped"
+				t.ErrorCode = task.stopCode
+				t.Message = task.stopMsg
+			})
 		} else {
-			// Check for structured CmdError from USBPcapCMD (e.g. NO_MATCHED_DEVICE)
 			var cmdErr *usbpcapcmd.CmdError
 			if errors.As(err, &cmdErr) {
-				task.task.ErrorCode = cmdErr.ErrorCode
-				task.task.Message = cmdErr.Message
-				task.task.Hint = cmdErr.Hint
-				switch cmdErr.ErrorCode {
-				case "NO_MATCHED_DEVICE":
-					task.task.Status = "no_device"
-					task.task.Hint = "Connect the device or verify VID/PID and retry."
-				default:
-					task.task.Status = "failed"
-				}
+				task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+					t.ErrorCode = cmdErr.ErrorCode
+					t.Message = cmdErr.Message
+					t.Hint = cmdErr.Hint
+					switch cmdErr.ErrorCode {
+					case "NO_MATCHED_DEVICE":
+						t.Status = "no_device"
+						t.Hint = "Connect the device or verify VID/PID and retry."
+					default:
+						t.Status = "failed"
+					}
+				})
 			} else {
-				task.task.Status = "failed"
-				task.task.ErrorCode = "CAPTURE_FAILED"
-				task.task.Message = err.Error()
+				task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+					t.Status = "failed"
+					t.ErrorCode = "CAPTURE_FAILED"
+					t.Message = err.Error()
+				})
 			}
 		}
 		s.endCapture(task)
@@ -459,39 +561,50 @@ func (s *Server) finalizeTask(task *captureTaskState, path string, captureResp *
 		return
 	}
 
-	task.task.Triggered = captureResp.Triggered
-	task.task.MatchedDevices = captureResp.MatchedDevices
-	task.task.StoreMode = captureResp.StoreMode
+	task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+		t.Triggered = captureResp.Triggered
+		t.MatchedDevices = captureResp.MatchedDevices
+		t.StoreMode = captureResp.StoreMode
+	})
 	if captureResp.Output == nil && !captureResp.Triggered {
-		task.task.Status = "no-match"
-		task.task.Message = strings.TrimSpace(captureResp.Reason)
+		task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+			t.Status = "no_match"
+			t.Message = strings.TrimSpace(captureResp.Reason)
+		})
 		s.endCapture(task)
 		s.cleanupCaptureFiles()
 		return
 	}
 	summary, summaryErr := pcap.Summarize(path)
 	if summaryErr != nil {
-		task.task.Status = "failed"
-		task.task.ErrorCode = "SUMMARY_FAILED"
-		task.task.Message = summaryErr.Error()
+		task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+			t.Status = "failed"
+			t.ErrorCode = "SUMMARY_FAILED"
+			t.Message = summaryErr.Error()
+		})
 		s.endCapture(task)
 		s.cleanupCaptureFiles()
 		return
 	}
 	summary.DroppedPackets = captureResp.DroppedPackets
-	task.task.Summary = summary
-	task.task.Status = "completed"
-
-	// Check for idle device (matched but no traffic)
+	task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+		t.Summary = summary
+		t.Status = "completed"
+	})
 	if summary.PacketCount == 0 {
-		if len(task.task.MatchedDevices) > 0 {
-			task.task.Status = "idle"
-			task.task.Message = "Device(s) found but no traffic captured. Device may be idle."
-			task.task.Hint = "Trigger device activity (e.g. GUI capture) or restart the device."
+		snapshot := task.taskSnapshot()
+		if len(snapshot.MatchedDevices) > 0 {
+			task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+				t.Status = "idle"
+				t.Message = "Device(s) found but no traffic captured. Device may be idle."
+				t.Hint = "Trigger device activity (e.g. GUI capture) or restart the device."
+			})
 		} else {
-			task.task.Status = "idle"
-			task.task.Message = "Capture completed with 0 packets. No matching device traffic seen."
-			task.task.Hint = "Check device connection or use a different interface."
+			task.updateTaskSnapshot(func(t *ipc.CaptureTask) {
+				t.Status = "idle"
+				t.Message = "Capture completed with 0 packets. No matching device traffic seen."
+				t.Hint = "Check device connection or use a different interface."
+			})
 		}
 	}
 	s.endCapture(task)
@@ -500,8 +613,9 @@ func (s *Server) finalizeTask(task *captureTaskState, path string, captureResp *
 
 func (s *Server) runStartedTask(ctx context.Context, task *captureTaskState) {
 	go s.monitorCapture(ctx, task)
-	resp, runErr := s.runner.CaptureContext(ctx, task.req, task.task.OutputPath)
-	s.finalizeTask(task, task.task.OutputPath, resp, runErr)
+	snapshot := task.taskSnapshot()
+	resp, runErr := s.runner.CaptureContext(ctx, task.req, snapshot.OutputPath)
+	s.finalizeTask(task, snapshot.OutputPath, resp, runErr)
 }
 
 func (s *Server) dropTask(taskID string) {
@@ -514,8 +628,8 @@ func (s *Server) taskByID(taskID string) *ipc.CaptureTask {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if task := s.tasks[taskID]; task != nil {
-		copy := task.task
-		return &copy
+		snapshot := task.taskSnapshot()
+		return &snapshot
 	}
 	return nil
 }
@@ -526,7 +640,7 @@ func (s *Server) listTasks() []ipc.CaptureTask {
 	out := make([]ipc.CaptureTask, 0, len(s.history)+1)
 	if s.active != nil {
 		if task := s.tasks[s.active.taskID]; task != nil {
-			out = append(out, task.task)
+			out = append(out, task.taskSnapshot())
 		}
 	}
 	out = append(out, s.history...)
@@ -538,7 +652,12 @@ func (s *Server) defaultOutputPath(name string) string {
 		now := time.Now()
 		name = fmt.Sprintf("usbpcap-%s-%03d.pcap", now.Format("20060102-150405"), now.Nanosecond()/1_000_000)
 	}
-	return filepath.Join(s.cfg.CaptureDir, filepath.Base(name))
+	base := filepath.Base(name)
+	// Force .pcap extension
+	if !strings.EqualFold(filepath.Ext(base), ".pcap") {
+		base = base + ".pcap"
+	}
+	return filepath.Join(s.cfg.CaptureDir, base)
 }
 
 // normalizeHex normalizes a hex string like "1a86" or "0X1A86" to "0x1a86".
@@ -654,7 +773,7 @@ func (s *Server) computeNextAction(task *ipc.CaptureTask) *ipc.NextAction {
 		})
 	case "idle":
 		return nextActionForTool("usbpcap_capture_status", map[string]any{})
-	case "no_device", "no-match":
+	case "no_device", "no_match":
 		return nextActionForTool("usbpcap_probe_device", map[string]any{})
 	default:
 		return nil
@@ -700,15 +819,15 @@ func (s *Server) handle(req ipc.Request) ipc.Response {
 		go s.runStartedTask(ctx, task)
 		<-task.done
 		resp := ipc.Response{
-			OK:                 true,
-			Status:             task.task.Status,
-			PCAPPath:           task.task.OutputPath,
-			Triggered:          task.task.Triggered,
-			StoreMode:          task.task.StoreMode,
-			MatchedDevices:     task.task.MatchedDevices,
-			Summary:            task.task.Summary,
-			Task:               &task.task,
-			StartedAt:          s.startedAt,
+			OK:                  true,
+			Status:              task.task.Status,
+			PCAPPath:            task.task.OutputPath,
+			Triggered:           task.task.Triggered,
+			StoreMode:           task.task.StoreMode,
+			MatchedDevices:      task.task.MatchedDevices,
+			Summary:             task.task.Summary,
+			Task:                &task.task,
+			StartedAt:           s.startedAt,
 			NormalizedArguments: normalized,
 		}
 		resp.NextAction = s.computeNextAction(&task.task)
@@ -796,9 +915,9 @@ func (s *Server) handleProbeDevice(req ipc.Request, normalized map[string]any) i
 		return ipc.Response{
 			OK: false, Status: "no_filter",
 			Error: "invalid_request", ErrorCode: "PROBE_FILTER_REQUIRED",
-			Message:              "probe requires vendorId or productId",
-			Hint:                 "Provide vendorId, optionally with productId.",
-			NormalizedArguments:   normalized,
+			Message:             "probe requires vendorId or productId",
+			Hint:                "Provide vendorId, optionally with productId.",
+			NormalizedArguments: normalized,
 		}
 	}
 	matches, err := s.probeDevices(req.VendorID, req.ProductID)
@@ -810,32 +929,32 @@ func (s *Server) handleProbeDevice(req ipc.Request, normalized map[string]any) i
 		return ipc.Response{
 			OK: false, Status: "no_device",
 			Error: "no_match", ErrorCode: "NO_MATCHED_DEVICE",
-			Message:            "No connected USB device matched the requested VID/PID.",
-			Hint:               "Check device connection or run usbpcap_list_interfaces first.",
-			MatchedDevices:     matches,
+			Message:             "No connected USB device matched the requested VID/PID.",
+			Hint:                "Check device connection or run usbpcap_list_interfaces first.",
+			MatchedDevices:      matches,
 			NormalizedArguments: normalized,
-			NextAction:         nextActionForTool("usbpcap_list_interfaces", nil),
+			NextAction:          nextActionForTool("usbpcap_list_interfaces", nil),
 		}
 	}
 	if len(matches) > 1 {
 		return ipc.Response{
 			OK: false, Status: "ambiguous_device",
 			Error: "multiple_matches", ErrorCode: "AMBIGUOUS_DEVICE",
-			Message:            fmt.Sprintf("Found %d matching devices across multiple interfaces.", len(matches)),
-			Hint:               "Specify an explicit interface to disambiguate.",
-			MatchedDevices:     matches,
+			Message:             fmt.Sprintf("Found %d matching devices across multiple interfaces.", len(matches)),
+			Hint:                "Specify an explicit interface to disambiguate.",
+			MatchedDevices:      matches,
 			NormalizedArguments: normalized,
 		}
 	}
 	return ipc.Response{
 		OK: true, Status: "found",
-		Message:            "Found unique matching device.",
-		MatchedDevices:     matches,
+		Message:             "Found unique matching device.",
+		MatchedDevices:      matches,
 		NormalizedArguments: normalized,
 		NextAction: nextActionForTool("usbpcap_smart_capture", map[string]any{
-			"interface":  matches[0].Interface,
-			"vendorId":   req.VendorID,
-			"productId":  req.ProductID,
+			"interface": matches[0].Interface,
+			"vendorId":  req.VendorID,
+			"productId": req.ProductID,
 		}),
 	}
 }
@@ -876,8 +995,8 @@ func (s *Server) handleWaitCaptureTask(req ipc.Request, normalized map[string]an
 			return ipc.Response{
 				OK: false, Status: "timeout",
 				Error: "timeout", ErrorCode: "WAIT_TIMEOUT",
-				Message:            "wait timed out but task may still be running",
-				Hint:               "Call getCaptureTask to check status.",
+				Message:             "wait timed out but task may still be running",
+				Hint:                "Call getCaptureTask to check status.",
 				NormalizedArguments: normalized,
 			}
 		}
@@ -928,9 +1047,9 @@ func (s *Server) handleSmartCapture(req ipc.Request, normalized map[string]any) 
 			return ipc.Response{
 				OK: false, Status: "no_device",
 				Error: "no_match", ErrorCode: "NO_MATCHED_DEVICE",
-				Message:            "No device found matching the requested VID/PID.",
-				Hint:               "Check device connection and try again.",
-				MatchedDevices:     matches,
+				Message:             "No device found matching the requested VID/PID.",
+				Hint:                "Check device connection and try again.",
+				MatchedDevices:      matches,
 				NormalizedArguments: normalized,
 				NextAction: nextActionForTool("usbpcap_probe_device", map[string]any{
 					"vendorId": req.VendorID, "productId": req.ProductID,
@@ -941,9 +1060,9 @@ func (s *Server) handleSmartCapture(req ipc.Request, normalized map[string]any) 
 			return ipc.Response{
 				OK: false, Status: "ambiguous_device",
 				Error: "multiple_matches", ErrorCode: "AMBIGUOUS_DEVICE",
-				Message:            fmt.Sprintf("Found %d matching devices. Specify an interface.", len(matches)),
-				Hint:               "Use one of the returned interfaces explicitly.",
-				MatchedDevices:     matches,
+				Message:             fmt.Sprintf("Found %d matching devices. Specify an interface.", len(matches)),
+				Hint:                "Use one of the returned interfaces explicitly.",
+				MatchedDevices:      matches,
 				NormalizedArguments: normalized,
 			}
 		}
@@ -974,10 +1093,10 @@ func (s *Server) handleSmartCapture(req ipc.Request, normalized map[string]any) 
 	<-task.done
 
 	resp := ipc.Response{
-		OK:                 true,
-		Status:             task.task.Status,
-		Task:               &task.task,
-		StartedAt:          s.startedAt,
+		OK:                  true,
+		Status:              task.task.Status,
+		Task:                &task.task,
+		StartedAt:           s.startedAt,
 		NormalizedArguments: normalized,
 	}
 
@@ -998,7 +1117,7 @@ func (s *Server) handleSmartCapture(req ipc.Request, normalized map[string]any) 
 			"durationSeconds": 30,
 			"storeMode":       "on-match",
 		})
-	case "no-match", "no_device":
+	case "no_match", "no_device":
 		resp.Message = task.task.Message
 		resp.NextAction = nextActionForTool("usbpcap_diagnose_capture", map[string]any{
 			"taskId": task.task.TaskID,
@@ -1031,26 +1150,25 @@ func (s *Server) handleAnalyze(req ipc.Request, normalized map[string]any) ipc.R
 		return errorResponse("invalid_request", "PCAP_PATH_REQUIRED",
 			"pcapPath is required", "Pass the pcap file path or a taskId from a completed capture.")
 	}
-	if !filepath.IsAbs(pcapPath) {
-		pcapPath = filepath.Join(s.cfg.CaptureDir, filepath.Base(pcapPath))
+	safePath, pathErr := s.safePcapPath(pcapPath)
+	if pathErr != nil {
+		return errorResponse("invalid_path", "INVALID_PCAP_PATH", pathErr.Error(),
+			"Specify a valid .pcap path within the capture directory.")
 	}
-	result, err := pcap.Analyze(pcapPath, nil)
+	addr := uint16(0)
+	if req.DeviceAddress != nil && *req.DeviceAddress > 0 {
+		addr = uint16(*req.DeviceAddress)
+	}
+	result, err := pcap.Analyze(safePath, &addr)
 	if err != nil {
 		return errorResponse("analyze_failed", "ANALYZE_FAILED", err.Error(),
 			"Verify the pcap file exists and is a valid USBPcap capture.")
 	}
-	if req.DeviceAddress != nil && *req.DeviceAddress > 0 {
-		addr := uint16(*req.DeviceAddress)
-		result, err = pcap.Analyze(pcapPath, &addr)
-		if err != nil {
-			return errorResponse("analyze_failed", "ANALYZE_FAILED", err.Error(), "")
-		}
-	}
 	return ipc.Response{
 		OK: true, Status: "ok",
-		Message:            fmt.Sprintf("Analyzed %d endpoints from %s", len(result.Endpoints), filepath.Base(pcapPath)),
-		PCAPPath:           pcapPath,
-		AnalyzeResult:      result,
+		Message:             fmt.Sprintf("Analyzed %d endpoints from %s", len(result.Endpoints), filepath.Base(safePath)),
+		PCAPPath:            safePath,
+		AnalyzeResult:       result,
 		NormalizedArguments: normalized,
 	}
 }
@@ -1068,8 +1186,8 @@ func (s *Server) handleDiagnoseCapture(req ipc.Request, normalized map[string]an
 		return ipc.Response{
 			OK: false, Status: "task_not_found",
 			Error: "task_not_found", ErrorCode: "TASK_NOT_FOUND",
-			Message:            "capture task not found for diagnosis",
-			Hint:               "Use listCaptureTasks to find recent tasks.",
+			Message:             "capture task not found for diagnosis",
+			Hint:                "Use listCaptureTasks to find recent tasks.",
 			NormalizedArguments: normalized,
 		}
 	}
@@ -1077,7 +1195,7 @@ func (s *Server) handleDiagnoseCapture(req ipc.Request, normalized map[string]an
 	d := s.diagnoseTask(task, req.VendorID, req.ProductID)
 	return ipc.Response{
 		OK: true, Status: "diagnosis",
-		DiagnosisResult:  d,
+		DiagnosisResult:     d,
 		NormalizedArguments: normalized,
 	}
 }
@@ -1107,7 +1225,7 @@ func (s *Server) diagnoseTask(task *ipc.CaptureTask, vendorID, productID string)
 		})
 		return d
 
-	case "no-match":
+	case "no_match":
 		d.Diagnosis = "FILTER_TOO_STRICT"
 		d.Recommendation = "on-match mode found no matching packets. Try removing endpoint/transferType filters."
 		d.NextAction = nextActionForTool("usbpcap_smart_capture", map[string]any{
@@ -1123,8 +1241,8 @@ func (s *Server) diagnoseTask(task *ipc.CaptureTask, vendorID, productID string)
 			d.Confidence = 0.8
 			d.Recommendation = "Capture completed but pcap has zero packets. Device may be idle."
 			d.NextAction = nextActionForTool("usbpcap_smart_capture", map[string]any{
-				"vendorId":  vendorID,
-				"productId": productID,
+				"vendorId":        vendorID,
+				"productId":       productID,
 				"durationSeconds": 30,
 			})
 			return d
@@ -1193,8 +1311,8 @@ func (s *Server) handleProfileDevice(req ipc.Request, normalized map[string]any)
 		return ipc.Response{
 			OK: false, Status: "no_device",
 			Error: "no_match", ErrorCode: "NO_MATCHED_DEVICE",
-			Message:            "No device found for profiling.",
-			Hint:               "Check device connection and try again.",
+			Message:             "No device found for profiling.",
+			Hint:                "Check device connection and try again.",
 			NormalizedArguments: normalized,
 		}
 	}
@@ -1202,8 +1320,8 @@ func (s *Server) handleProfileDevice(req ipc.Request, normalized map[string]any)
 		return ipc.Response{
 			OK: false, Status: "ambiguous_device",
 			Error: "multiple_matches", ErrorCode: "AMBIGUOUS_DEVICE",
-			Message:            fmt.Sprintf("Found %d matching devices. Specify an interface.", len(matches)),
-			MatchedDevices:     matches,
+			Message:             fmt.Sprintf("Found %d matching devices. Specify an interface.", len(matches)),
+			MatchedDevices:      matches,
 			NormalizedArguments: normalized,
 		}
 	}
@@ -1239,8 +1357,8 @@ func (s *Server) handleProfileDevice(req ipc.Request, normalized map[string]any)
 		return ipc.Response{
 			OK: false, Status: task.task.Status,
 			Error: "profile_no_data", ErrorCode: "PROFILE_NO_DATA",
-			Message:           fmt.Sprintf("Profile capture produced no data (%s).", task.task.Status),
-			DiagnosisResult:   diagnosis,
+			Message:             fmt.Sprintf("Profile capture produced no data (%s).", task.task.Status),
+			DiagnosisResult:     diagnosis,
 			NormalizedArguments: normalized,
 		}
 	}
@@ -1281,37 +1399,45 @@ func (s *Server) handleProfileDevice(req ipc.Request, normalized map[string]any)
 
 	return ipc.Response{
 		OK: true, Status: "ok",
-		ProfileResult:    profile,
-		PCAPPath:         outputPath,
+		ProfileResult:       profile,
+		PCAPPath:            outputPath,
 		NormalizedArguments: normalized,
 		NextAction: nextActionForTool("usbpcap_smart_capture", map[string]any{
-			"interface":  match.Interface,
-			"vendorId":   match.VendorID,
-			"productId":  match.ProductID,
+			"interface": match.Interface,
+			"vendorId":  match.VendorID,
+			"productId": match.ProductID,
 		}),
 	}
 }
 
-// safePcapPath ensures the path is within the configured capture directory.
+// safePcapPath ensures the path is within the configured capture directory,
+// has a .pcap extension, and is a regular file (not a symlink/junction).
 func (s *Server) safePcapPath(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("pcap path is empty")
 	}
-	// Allow paths within the capture dir
 	abs := path
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(s.cfg.CaptureDir, abs)
 	}
 	abs = filepath.Clean(abs)
 	captureDir := filepath.Clean(s.cfg.CaptureDir)
-	if !strings.HasPrefix(abs, captureDir) {
+
+	// Use Rel to verify containment (handles sibling-prefix dirs like
+	// C:\captures2 that would pass a string-prefix check for C:\captures).
+	rel, err := filepath.Rel(captureDir, abs)
+	if err != nil || strings.HasPrefix(rel, "..") {
 		return "", errors.New("pcap path must be within the capture directory")
 	}
 	if !strings.EqualFold(filepath.Ext(abs), ".pcap") {
 		return "", errors.New("file must have .pcap extension")
 	}
-	if _, err := os.Stat(abs); err != nil {
+	info, err := os.Lstat(abs)
+	if err != nil {
 		return "", fmt.Errorf("pcap file not accessible: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", errors.New("pcap path must be a regular file, not a symlink or special file")
 	}
 	return abs, nil
 }
@@ -1365,9 +1491,9 @@ func (s *Server) handleExportData(req ipc.Request, normalized map[string]any) ip
 
 	resp := ipc.Response{
 		OK: true, Status: "ok",
-		Message:            fmt.Sprintf("Exported %d payload(s) from %s", len(payloads), filepath.Base(pcapPath)),
-		PCAPPath:           pcapPath,
-		ExportContent:      exportContent,
+		Message:             fmt.Sprintf("Exported %d payload(s) from %s", len(payloads), filepath.Base(pcapPath)),
+		PCAPPath:            pcapPath,
+		ExportContent:       exportContent,
 		NormalizedArguments: normalized,
 	}
 

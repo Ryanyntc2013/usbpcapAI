@@ -5,13 +5,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"usbpcap-ai/internal/service"
@@ -20,20 +24,35 @@ import (
 // version is set by ldflags at build time: -X main.version=X.Y.Z
 var version = "dev"
 
-const serviceName = "USBPcapAIService"
+const (
+	serviceName           = "USBPcapAIService"
+	singleInstanceMutexName = "Global\\USBPcapAIService"
+)
 
 type serviceProgram struct {
-	cfg service.Config
+	cfg  service.Config
+	elog *eventlog.Log
+}
+
+func (m *serviceProgram) logError(msg string) {
+	if m.elog != nil {
+		m.elog.Error(1, msg)
+	}
 }
 
 func (m *serviceProgram) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.Status) (bool, uint32) {
 	s <- svc.Status{State: svc.StartPending}
-	s <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := service.NewServer(m.cfg)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- service.NewServer(m.cfg).ListenAndServe()
+		errCh <- srv.ListenAndServeContext(ctx)
 	}()
+
+	s <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 
 	for {
 		select {
@@ -41,10 +60,18 @@ func (m *serviceProgram) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<
 			switch c.Cmd {
 			case svc.Stop, svc.Shutdown:
 				s <- svc.Status{State: svc.StopPending}
+				cancel()
+				// Wait for the server to finish with a timeout
+				select {
+				case <-errCh:
+				case <-time.After(10 * time.Second):
+				}
 				return false, 0
 			}
 		case err := <-errCh:
 			if err != nil {
+				msg := fmt.Sprintf("USBPcapAIService failed: %v\n\nPossible cause: Another instance (foreground 'run' mode or another service) is already holding the named pipe \\\\.\\pipe\\usbpcap-ai-service. Only one instance can use the pipe at a time.", err)
+				m.logError(msg)
 				return false, 1
 			}
 			return false, 0
@@ -67,6 +94,7 @@ func main() {
 	if len(os.Args) > 1 {
 		switch strings.ToLower(os.Args[1]) {
 		case "run":
+			checkSingleInstance()
 			must(service.NewServer(cfg).ListenAndServe())
 			return
 		case "install":
@@ -132,7 +160,17 @@ func main() {
 	// No args: if running as Windows service, enter SCM loop; otherwise show help
 	isService, err := svc.IsWindowsService()
 	if err == nil && isService {
-		must(svc.Run(serviceName, &serviceProgram{cfg: cfg}))
+		checkSingleInstance()
+		// Try to open Windows Event Log for error reporting.
+		// eventlog.Open works for any source name — Windows auto-creates
+		// an entry under the Application log if none is pre-registered.
+		var elog *eventlog.Log
+		if e, err := eventlog.Open(serviceName); err == nil {
+			elog = e
+			defer e.Close()
+		}
+		prog := &serviceProgram{cfg: cfg, elog: elog}
+		must(svc.Run(serviceName, prog))
 		return
 	}
 	// Not a Windows service and no args — print help
@@ -306,12 +344,20 @@ Commands:
   version             Show version
   help                Show this help
 
-Auto-launch mode:
+Auto-launch mode (default, no admin required):
   USBPcapMCP.exe automatically starts USBPcapService.exe run when needed
   and stops it when the MCP exits — no admin required.
 
+⚠ IMPORTANT: Foreground mode and Windows service mode are MUTUALLY EXCLUSIVE.
+  • Do NOT run 'USBPcapService.exe run' while the service is installed and
+    running, and vice versa.
+  • Both modes share the same named pipe (\\.\pipe\usbpcap-ai-service)
+    and only one process can hold it at a time.
+  • If you need the Windows service, stop/disable the MCP auto-launch first.
+  • If you use MCP auto-launch, ensure the Windows service is stopped.
+
 Examples:
-  USBPcapService.exe run                    # foreground mode
+  USBPcapService.exe run                    # foreground mode (MCP auto-launch)
   USBPcapService.exe install                # install + auto-config
   USBPcapService.exe install --capture-dir "D:\caps"
   USBPcapService.exe driver-install
@@ -344,4 +390,44 @@ func mustExecutable() string {
 		panic(err)
 	}
 	return p
+}
+
+// checkSingleInstance creates a named Windows mutex to prevent multiple
+// USBPcapService processes from running simultaneously. Only one instance
+// (foreground "run" mode or SCM service) can hold the named pipe at a time.
+func checkSingleInstance() {
+	mutex, err := windows.CreateMutex(nil, false, windows.StringToUTF16Ptr(singleInstanceMutexName))
+	if err == windows.ERROR_ALREADY_EXISTS {
+		// Another instance is already holding the mutex.
+		fmt.Fprint(os.Stderr, `
+ERROR: Another instance of USBPcapService is already running.
+
+  USBPcapService uses a single named pipe (\\.\pipe\usbpcap-ai-service)
+  that can only be held by one process at a time.
+
+  Possible causes:
+    • A foreground 'USBPcapService.exe run' is already running (e.g. from
+      an active VS Code / MCP session that auto-launched it).
+    • The Windows service "USBPcapAIService" is currently running
+      (check with: sc.exe query USBPcapAIService).
+
+  To resolve:
+    1. Identify and stop the other instance.
+    2. If the Windows service is running, use:
+         USBPcapService.exe stop
+    3. Or close the VS Code / MCP session that launched the foreground mode.
+
+  WARNING: Foreground mode and Windows service mode are mutually exclusive.
+  Use only one at a time.
+`)
+		os.Exit(1)
+	}
+	if err != nil {
+		// Unexpected error — log a warning but let the process continue.
+		fmt.Fprintf(os.Stderr, "Warning: could not create instance mutex: %v\n", err)
+		return
+	}
+	// First instance: the mutex handle is held until process exit.
+	// Leak the handle intentionally — Windows releases it on process termination.
+	_ = mutex
 }
