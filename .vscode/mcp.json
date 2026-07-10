@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "usbpcap": {
+      "type": "stdio",
+      "command": "E:\\test\\usbpcap\\out\\build\\vs2022-x64-release\\bin\\Release\\USBPcapMCP.exe",
+      "args": []
+    }
+  }
+}
