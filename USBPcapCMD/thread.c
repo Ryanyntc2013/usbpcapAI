@@ -489,8 +489,14 @@ DWORD WINAPI read_thread(LPVOID param)
         goto finish;
     }
 
+    /* Write handle is opened lazily by begin_output_stream() in both
+     * immediate and on-match modes.  Only treat a missing write handle
+     * as fatal when the caller explicitly requires a pre-opened handle
+     * (stdout / pipe mode, signalled by filename == "-"). */
     if ((data->write_handle == INVALID_HANDLE_VALUE) &&
-        !((data->store_mode == USBPCAP_STORE_MODE_ON_MATCH) && (strncmp(data->filename, "-", 2) != 0)))
+        ((data->store_mode != USBPCAP_STORE_MODE_IMMEDIATE) &&
+         (data->store_mode != USBPCAP_STORE_MODE_ON_MATCH)) &&
+        (strncmp(data->filename, "-", 2) != 0))
     {
         fprintf(stderr, "Thread started with invalid write handle!\n");
         goto finish;

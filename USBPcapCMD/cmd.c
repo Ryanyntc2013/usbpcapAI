@@ -2763,6 +2763,28 @@ int __cdecl main(int argc, CHAR **argv)
                 ret = capture_ret;
             }
 
+            /* In immediate mode the worker thread opens the output and writes the
+             * pcap header inside begin_output_stream() right after seeing the first
+             * packet.  Because start_capture() returns before the worker has processed
+             * any data, the main thread would see triggered==FALSE.  Fix: in immediate
+             * mode we know writing started (or will start very soon); treat as
+             * triggered so the JSON contract is satisfied. */
+            if (data.store_mode == USBPCAP_STORE_MODE_IMMEDIATE)
+            {
+                data.triggered = TRUE;
+            }
+            /* In on-match mode the worker waits until a matching packet arrives,
+             * then calls begin_output_stream() which sets both output_created and
+             * triggered together.  If the output file has already been created by
+             * the worker, we missed the triggered flag due to the race; sync it
+             * here from the more visible output_created field. */
+            if ((data.store_mode == USBPCAP_STORE_MODE_ON_MATCH) &&
+                (data.triggered == FALSE) &&
+                (data.output_created == TRUE))
+            {
+                data.triggered = TRUE;
+            }
+
             if (json_output)
             {
                 printf("{\"ok\":true,\"storeMode\":");

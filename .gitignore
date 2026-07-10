@@ -58,3 +58,4 @@ __pycache__/
 # ── OS Artifacts ────────────────────────────────────────────
 Thumbs.db
 Desktop.ini
+usbpcap-ai/coverage
